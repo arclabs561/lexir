@@ -1,0 +1,31 @@
+## `lexir` recordlog: safety + invariants (CLI)
+
+This repo’s `lexir` CLI supports a checkpoint + append-only record log workflow:
+
+- `index.bin` is the checkpoint (snapshot).
+- `ops.log` is the record log (append-only ops, framed + CRC).
+- `index.bin.meta` stores `applied_records` (how many log records are included in the checkpoint).
+
+### Safety invariants (must hold)
+
+- **Meta bounds**: \(0 \le applied\_records \le ops\_len\) always.
+- **Validate semantics**: `log-validate` checks that:
+  - `replay(checkpoint, ops[applied_records..]) == replay(empty, ops)`
+- **Ordering**: checkpoint is written before meta (never meta-first).
+- **Missing meta is ambiguous** when checkpoint exists and the log is non-empty; `log-doctor --fix` is the safe repair path.
+
+### Replay posture
+
+- **Best-effort** replay is WAL-style: it stops at a torn tail record (safe prefix property).
+- **Strict** replay errors on any truncation/corruption (use for validation and debugging).
+
+### Concurrency contract
+
+The CLI commands are **single-writer** by design (no inter-process locking). If you need concurrency, add an external lock (e.g. `flock`) or implement a lock file.
+
+### Recommended operator loop
+
+- After mutations: `log-status` → `log-validate`
+- When meta is missing: `log-doctor --fix` → `log-validate`
+- After crashes: `log-scan` (best-effort) then `log-scan --strict` (should fail on torn tail)
+
