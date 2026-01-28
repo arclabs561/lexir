@@ -7,7 +7,11 @@ license = "MIT OR Apache-2.0"
 authors = ["Arc <attobop@gmail.com>"]
 description = "Lexical IR (BM25/TF-IDF) on top of postings lists."
 repository = "https://github.com/arclabs561/lexir"
+homepage = "https://github.com/arclabs561/lexir"
 documentation = "https://docs.rs/lexir"
+readme = "README.md"
+keywords = ["information-retrieval", "bm25", "tf-idf", "search"]
+categories = ["text-processing", "algorithms"]
 
 [dependencies]
 postings = { workspace = true }
