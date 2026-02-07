@@ -251,7 +251,11 @@ impl InvertedIndex {
             .plan_candidates(query_terms, PlannerConfig::default())
         {
             CandidatePlan::Candidates(c) => c,
-            CandidatePlan::ScanAll => self.document_ids().collect(),
+            CandidatePlan::ScanAll => {
+                let mut v: Vec<u32> = self.document_ids().collect();
+                v.sort_unstable();
+                v
+            }
         }
     }
 
@@ -425,4 +429,35 @@ fn score_optimized(
         score += idf * tf_score;
     }
     score
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retrieve_tie_breaks_by_doc_id() {
+        let mut ix = InvertedIndex::new();
+        ix.add_document(1, &["a".into(), "x".into()]);
+        ix.add_document(2, &["a".into(), "x".into()]);
+
+        let hits = ix
+            .retrieve(&["a".into()], 10, Bm25Params::default())
+            .unwrap();
+        assert_eq!(hits[0].0, 1);
+        assert_eq!(hits[1].0, 2);
+    }
+
+    #[test]
+    fn candidates_scan_all_is_sorted() {
+        let mut ix = InvertedIndex::new();
+        // Make "common" broad enough to trigger the default bailout.
+        for doc_id in 0..10u32 {
+            ix.add_document(doc_id, &["common".into(), format!("u{doc_id}")]);
+        }
+        let cands = ix.candidates(&["common".into()]);
+        let mut expected: Vec<u32> = (0..10u32).collect();
+        expected.sort_unstable();
+        assert_eq!(cands, expected);
+    }
 }

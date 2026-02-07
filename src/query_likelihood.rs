@@ -207,3 +207,29 @@ pub fn retrieve_query_likelihood(
     }
     Ok(results)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bm25::InvertedIndex;
+
+    #[test]
+    fn query_likelihood_is_deterministic_on_ties() {
+        let mut ix = InvertedIndex::new();
+        // Two identical docs, query matches both equally.
+        ix.add_document(1, &["a".into(), "b".into()]);
+        ix.add_document(2, &["a".into(), "b".into()]);
+
+        let hits = retrieve_query_likelihood(
+            &ix,
+            &["a".into()],
+            10,
+            QueryLikelihoodParams {
+                smoothing: SmoothingMethod::dirichlet(),
+            },
+        )
+        .unwrap();
+        assert_eq!(hits[0].0, 1);
+        assert_eq!(hits[1].0, 2);
+    }
+}

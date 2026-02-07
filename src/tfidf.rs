@@ -136,3 +136,22 @@ pub fn retrieve_tfidf(
     }
     Ok(scored)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bm25::InvertedIndex;
+
+    #[test]
+    fn tfidf_tie_breaks_by_doc_id() {
+        let mut ix = InvertedIndex::new();
+        ix.add_document(1, &["a".into()]);
+        ix.add_document(2, &["a".into()]);
+        // Ensure df(a) < N so IDF is non-zero under standard IDF.
+        ix.add_document(3, &["x".into()]);
+
+        let hits = retrieve_tfidf(&ix, &["a".into()], 10, TfIdfParams::linear()).unwrap();
+        assert_eq!(hits[0].0, 1);
+        assert_eq!(hits[1].0, 2);
+    }
+}

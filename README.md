@@ -5,6 +5,11 @@ Lexical IR (BM25/TF‑IDF) on top of postings lists.
 - **Docs**: <https://docs.rs/lexir>
 - **CI**: <https://github.com/arclabs561/lexir/actions>
 
+## Feature Selection
+
+- **`default`**: Includes `persistence`.
+- **In-memory only**: disable default features, e.g. `lexir = { version = "0.1.0", default-features = false }`.
+
 ## What it is
 
 `lexir` is the scoring/ranking layer. Candidate generation and storage live in `postings`.
@@ -26,4 +31,3 @@ assert_eq!(hits[0].0, 1);
 - `recordlog`: append-only operation logs for rebuildable indexes (CLI uses this)
 - `cli`: enables the `lexir` CLI (debugging + end-to-end validation)
 - `fuzzy`: fuzzy query expansion via `gramdex`
-
