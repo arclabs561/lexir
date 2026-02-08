@@ -2,17 +2,29 @@
 
 Lexical IR (BM25/TF‑IDF) on top of postings lists.
 
-- **Docs**: <https://docs.rs/lexir>
-- **CI**: <https://github.com/arclabs561/lexir/actions>
+**Status**: experimental. This repository is public as a reference implementation; it is not
+currently packaged for `crates.io`.
 
 ## Feature Selection
 
 - **`default`**: Includes `persistence`.
-- **In-memory only**: disable default features, e.g. `lexir = { version = "0.1.0", default-features = false }`.
+- **In-memory only**: disable default features.
 
 ## What it is
 
 `lexir` is the scoring/ranking layer. Candidate generation and storage live in `postings`.
+
+## Building
+
+`lexir` uses local path dependencies for sibling crates:
+
+- `postings`
+- `rankfns`
+- `durability` (optional, for persistence)
+- `gramdex` (optional, for fuzzy expansion)
+- `textprep` (optional, for the CLI)
+
+In my local layout, these live next to `lexir/` under a shared Cargo workspace.
 
 ## Usage (library)
 
