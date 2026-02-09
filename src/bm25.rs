@@ -11,22 +11,9 @@
 
 use crate::Error;
 use postings::{CandidatePlan, PlannerConfig, PostingsIndex};
-use rankfns::{bm25_idf_plus1, bm25_tf, Retriever};
+use rankfns::{bm25_idf_plus1, bm25_tf};
 use std::cell::RefCell;
 use std::collections::HashMap;
-
-impl Retriever for InvertedIndex {
-    type Query = [String];
-    type DocId = u32;
-
-    fn retrieve(
-        &self,
-        query: &Self::Query,
-        k: usize,
-    ) -> Result<Vec<(Self::DocId, f32)>, Box<dyn std::error::Error>> {
-        Ok(self.retrieve(query, k, Bm25Params::default())?)
-    }
-}
 
 /// BM25 variant selection.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -270,11 +257,11 @@ impl InvertedIndex {
 
         let mut idf_map = self.precomputed_idf.borrow_mut();
         idf_map.clear();
-        let n = self.num_docs() as f32;
+        let n = self.num_docs();
         for term in self.postings.terms() {
-            let df_f = self.postings.df(term) as f32;
-            if df_f > 0.0 {
-                let idf = bm25_idf_plus1(n, df_f);
+            let df = self.postings.df(term);
+            if df > 0 {
+                let idf = bm25_idf_plus1(n, df);
                 idf_map.insert(term.to_string(), idf);
             }
         }
@@ -289,8 +276,8 @@ impl InvertedIndex {
                 return idf;
             }
         }
-        let df = self.postings.df(term) as f32;
-        let n = self.num_docs() as f32;
+        let df = self.postings.df(term);
+        let n = self.num_docs();
         bm25_idf_plus1(n, df)
     }
 

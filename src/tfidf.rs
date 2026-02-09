@@ -8,7 +8,7 @@
 
 use crate::bm25::InvertedIndex;
 use crate::Error;
-use rankfns as rf;
+use rankfns::{idf_transform, tf_transform, IdfVariant, TfVariant};
 
 /// TF-IDF parameters.
 #[derive(Debug, Clone, Copy)]
@@ -46,40 +46,6 @@ impl TfIdfParams {
     }
 }
 
-/// Term-frequency transform variants.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TfVariant {
-    /// Linear TF: `tf = f_{t,d}`.
-    Linear,
-    /// Log-scaled TF: `tf = 1 + ln(f_{t,d})` for `f_{t,d} > 0`.
-    LogScaled,
-}
-
-/// IDF transform variants.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum IdfVariant {
-    /// Standard IDF: `ln(N / df)`.
-    Standard,
-    /// Smoothed IDF: `ln(1 + (N - df + 0.5) / (df + 0.5))` (BM25-style, stable).
-    Smoothed,
-}
-
-fn compute_tf(tf_count: u32, variant: TfVariant) -> f32 {
-    let v = match variant {
-        TfVariant::Linear => rf::TfVariant::Linear,
-        TfVariant::LogScaled => rf::TfVariant::LogScaled,
-    };
-    rf::tf_transform(tf_count, v)
-}
-
-fn compute_idf(num_docs: u32, doc_frequency: u32, variant: IdfVariant) -> f32 {
-    let v = match variant {
-        IdfVariant::Standard => rf::IdfVariant::Standard,
-        IdfVariant::Smoothed => rf::IdfVariant::Smoothed,
-    };
-    rf::idf_transform(num_docs, doc_frequency, v)
-}
-
 /// TF-IDF score for a document, given tokenized query terms.
 pub fn score_tfidf(
     index: &InvertedIndex,
@@ -94,9 +60,9 @@ pub fn score_tfidf(
         if tf_count == 0 {
             continue;
         }
-        let tf = compute_tf(tf_count, params.tf_variant);
+        let tf = tf_transform(tf_count, params.tf_variant);
         let df = index.doc_frequency(term);
-        let idf = compute_idf(num_docs, df, params.idf_variant);
+        let idf = idf_transform(num_docs, df, params.idf_variant);
         if idf == 0.0 {
             continue;
         }

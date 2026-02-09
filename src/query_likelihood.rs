@@ -8,57 +8,8 @@
 
 use crate::bm25::InvertedIndex;
 use crate::Error;
-use rankfns as rf;
+use rankfns::{lm_smoothed_p, SmoothingMethod};
 use std::collections::{HashMap, HashSet};
-
-/// Smoothing method for query likelihood.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SmoothingMethod {
-    /// Jelinek-Mercer smoothing: interpolates document and corpus language models.
-    ///
-    /// `lambda` is clamped to `[0, 1]`.
-    JelinekMercer {
-        /// Interpolation weight.
-        lambda: f32,
-    },
-    /// Dirichlet smoothing: Bayesian approach with automatic length adaptation.
-    ///
-    /// `mu` is clamped to `>= 0`.
-    Dirichlet {
-        /// Prior strength.
-        mu: f32,
-    },
-}
-
-impl Default for SmoothingMethod {
-    fn default() -> Self {
-        Self::Dirichlet { mu: 1000.0 }
-    }
-}
-
-impl SmoothingMethod {
-    /// Create Jelinek-Mercer smoothing with default lambda (0.5).
-    pub fn jelinek_mercer() -> Self {
-        Self::JelinekMercer { lambda: 0.5 }
-    }
-
-    /// Create Jelinek-Mercer smoothing with custom lambda.
-    pub fn jelinek_mercer_with_lambda(lambda: f32) -> Self {
-        Self::JelinekMercer {
-            lambda: lambda.clamp(0.0, 1.0),
-        }
-    }
-
-    /// Create Dirichlet smoothing with default mu (1000.0).
-    pub fn dirichlet() -> Self {
-        Self::Dirichlet { mu: 1000.0 }
-    }
-
-    /// Create Dirichlet smoothing with custom mu.
-    pub fn dirichlet_with_mu(mu: f32) -> Self {
-        Self::Dirichlet { mu: mu.max(0.0) }
-    }
-}
 
 /// Query likelihood parameters.
 #[derive(Debug, Clone, Copy, Default)]
@@ -106,12 +57,7 @@ fn score_jelinek_mercer(
         let doc_len = index.document_length(doc_id) as f32;
         let tf = index.term_frequency(doc_id, term) as f32;
         let p_corpus = corpus_probability(term, corpus_term_freqs, corpus_size);
-        let p_smoothed = rf::lm_smoothed_p(
-            tf,
-            doc_len,
-            p_corpus,
-            rf::SmoothingMethod::JelinekMercer { lambda },
-        );
+        let p_smoothed = lm_smoothed_p(tf, doc_len, p_corpus, SmoothingMethod::JelinekMercer { lambda });
         if p_smoothed > 0.0 {
             log_score += p_smoothed.ln();
         }
@@ -134,12 +80,7 @@ fn score_dirichlet(
     for term in query_terms {
         let term_freq = index.term_frequency(doc_id, term) as f32;
         let p_corpus = corpus_probability(term, corpus_term_freqs, corpus_size);
-        let p_smoothed = rf::lm_smoothed_p(
-            term_freq,
-            doc_length,
-            p_corpus,
-            rf::SmoothingMethod::Dirichlet { mu },
-        );
+        let p_smoothed = lm_smoothed_p(term_freq, doc_length, p_corpus, SmoothingMethod::Dirichlet { mu });
         if p_smoothed > 0.0 {
             log_score += p_smoothed.ln();
         }
@@ -225,7 +166,7 @@ mod tests {
             &["a".into()],
             10,
             QueryLikelihoodParams {
-                smoothing: SmoothingMethod::dirichlet(),
+                smoothing: SmoothingMethod::default(),
             },
         )
         .unwrap();
