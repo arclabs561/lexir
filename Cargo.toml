@@ -15,13 +15,13 @@ keywords = ["information-retrieval", "bm25", "tf-idf", "search"]
 categories = ["text-processing", "algorithms"]
 
 [dependencies]
-postings = { path = "../postings", version = "0.1.0" }
+postings = { git = "https://github.com/arclabs561/postings" }
 thiserror = "2.0"
-rankfns = { path = "../rankfns", version = "0.1.0" }
-gramdex = { path = "../gramdex", version = "0.1.0", optional = true }
-textprep = { path = "../textprep", version = "0.1.0", optional = true }
+rankfns = { git = "https://github.com/arclabs561/rankfns" }
+gramdex = { version = "0.1.0", optional = true }
+textprep = { version = "0.1.0", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
-durability = { path = "../durability", version = "0.1.0", optional = true }
+durability = { git = "https://github.com/arclabs561/durability", optional = true }
 serde = { version = "1.0", features = ["derive"], optional = true }
 postcard = { version = "1.0", optional = true, features = ["alloc"] }
 

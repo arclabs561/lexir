@@ -56,7 +56,7 @@ pub fn score_tfidf(
     let mut score = 0.0;
     let num_docs = index.num_docs();
     for term in query_terms {
-        let tf_count = index.term_frequency(doc_id, term) as u32;
+        let tf_count = index.term_frequency(doc_id, term);
         if tf_count == 0 {
             continue;
         }

@@ -19,6 +19,8 @@
 //! - Robertson & Zaragoza (2009): BM25 and beyond
 //! - Spärck Jones (1972): term specificity / IDF motivation
 
+#![forbid(unsafe_code)]
+
 pub mod bm25;
 #[cfg(feature = "fuzzy")]
 pub mod fuzzy;

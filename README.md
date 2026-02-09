@@ -16,15 +16,17 @@ currently packaged for `crates.io`.
 
 ## Building
 
-`lexir` uses local path dependencies for sibling crates:
+`lexir` is not on `crates.io` yet; use a git dependency:
 
-- `postings`
-- `rankfns`
-- `durability` (optional, for persistence)
-- `gramdex` (optional, for fuzzy expansion)
-- `textprep` (optional, for the CLI)
+```toml
+[dependencies]
+lexir = { git = "https://github.com/arclabs561/lexir" }
+```
 
-In my local layout, these live next to `lexir/` under a shared Cargo workspace.
+Notes:
+
+- `postings`, `rankfns`, and `durability` are pulled as git dependencies.
+- `gramdex` and `textprep` are pulled from `crates.io` (and are only used when their features are enabled).
 
 ## Usage (library)
 
