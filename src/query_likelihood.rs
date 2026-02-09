@@ -18,19 +18,6 @@ pub struct QueryLikelihoodParams {
     pub smoothing: SmoothingMethod,
 }
 
-fn compute_corpus_stats(index: &InvertedIndex) -> (HashMap<String, u32>, u32) {
-    let mut corpus_term_freqs: HashMap<String, u32> = HashMap::new();
-    let mut corpus_size: u32 = 0;
-
-    for term in index.terms() {
-        let total_tf: u32 = index.postings_iter(term).map(|(_doc, tf)| tf).sum();
-        corpus_term_freqs.insert(term.to_string(), total_tf);
-        corpus_size += total_tf;
-    }
-
-    (corpus_term_freqs, corpus_size)
-}
-
 fn corpus_probability(
     term: &str,
     corpus_term_freqs: &HashMap<String, u32>,
@@ -106,7 +93,8 @@ pub fn retrieve_query_likelihood(
         return Ok(Vec::new());
     }
 
-    let (corpus_term_freqs, corpus_size) = compute_corpus_stats(index);
+    let (corpus_term_freqs, corpus_size) = index.corpus_stats_cached();
+    let corpus_term_freqs = corpus_term_freqs.as_ref();
 
     // Candidate docs: prefer postings-based candidates, but fall back to all docs
     // (smoothing can give non-zero mass even for non-matching docs).
@@ -123,7 +111,7 @@ pub fn retrieve_query_likelihood(
                 doc_id,
                 query_terms,
                 lambda,
-                &corpus_term_freqs,
+                corpus_term_freqs,
                 corpus_size,
             ),
             SmoothingMethod::Dirichlet { mu } => score_dirichlet(
@@ -131,7 +119,7 @@ pub fn retrieve_query_likelihood(
                 doc_id,
                 query_terms,
                 mu,
-                &corpus_term_freqs,
+                corpus_term_freqs,
                 corpus_size,
             ),
         };

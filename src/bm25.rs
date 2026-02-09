@@ -14,6 +14,13 @@ use postings::{CandidatePlan, PlannerConfig, PostingsIndex};
 use rankfns::{bm25_idf_plus1, bm25_tf};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+struct CachedCorpusStats {
+    term_freqs: Arc<HashMap<String, u32>>,
+    corpus_size: u32,
+}
 
 /// BM25 variant selection.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -100,6 +107,8 @@ pub struct InvertedIndex {
     // Lazily computed IDF cache (term -> idf), invalidated on write.
     precomputed_idf: RefCell<HashMap<String, f32>>,
     idf_computed_at_num_docs: RefCell<u32>,
+    // Lazily computed corpus term frequencies for query-likelihood retrieval.
+    corpus_stats: RefCell<Option<CachedCorpusStats>>,
 }
 
 impl Default for InvertedIndex {
@@ -115,6 +124,7 @@ impl InvertedIndex {
             postings: PostingsIndex::new(),
             precomputed_idf: RefCell::new(HashMap::new()),
             idf_computed_at_num_docs: RefCell::new(0),
+            corpus_stats: RefCell::new(None),
         }
     }
 
@@ -124,6 +134,7 @@ impl InvertedIndex {
             postings,
             precomputed_idf: RefCell::new(HashMap::new()),
             idf_computed_at_num_docs: RefCell::new(0),
+            corpus_stats: RefCell::new(None),
         }
     }
 
@@ -187,6 +198,7 @@ impl InvertedIndex {
         let _ = self.postings.add_document(doc_id, terms);
         self.precomputed_idf.borrow_mut().clear();
         *self.idf_computed_at_num_docs.borrow_mut() = 0;
+        *self.corpus_stats.borrow_mut() = None;
     }
 
     /// Delete a document by id.
@@ -197,6 +209,7 @@ impl InvertedIndex {
         if deleted {
             self.precomputed_idf.borrow_mut().clear();
             *self.idf_computed_at_num_docs.borrow_mut() = 0;
+            *self.corpus_stats.borrow_mut() = None;
         }
         deleted
     }
@@ -229,6 +242,28 @@ impl InvertedIndex {
     /// Average document length (in terms) over live docs.
     pub fn avg_doc_len(&self) -> f32 {
         self.postings.avg_doc_len()
+    }
+
+    pub(crate) fn corpus_stats_cached(&self) -> (Arc<HashMap<String, u32>>, u32) {
+        if let Some(cs) = self.corpus_stats.borrow().as_ref() {
+            return (cs.term_freqs.clone(), cs.corpus_size);
+        }
+
+        let mut corpus_term_freqs: HashMap<String, u32> = HashMap::new();
+        let mut corpus_size: u32 = 0;
+
+        for term in self.terms() {
+            let total_tf: u32 = self.postings_iter(term).map(|(_doc, tf)| tf).sum();
+            corpus_term_freqs.insert(term.to_string(), total_tf);
+            corpus_size = corpus_size.saturating_add(total_tf);
+        }
+
+        let term_freqs = Arc::new(corpus_term_freqs);
+        *self.corpus_stats.borrow_mut() = Some(CachedCorpusStats {
+            term_freqs: term_freqs.clone(),
+            corpus_size,
+        });
+        (term_freqs, corpus_size)
     }
 
     /// Candidate documents: docs that contain at least one query term, with bailout.
