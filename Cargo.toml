@@ -15,9 +15,9 @@ keywords = ["search", "bm25", "tf-idf", "search"]
 categories = ["text-processing", "algorithms"]
 
 [dependencies]
-postings = { path = "../postings" }
+postings = { version = "0.1.0", path = "../postings" }
 thiserror = "2.0"
-rankfns = { path = "../rankfns" }
+rankfns = { version = "0.1.0", path = "../rankfns" }
 gramdex = { version = "0.1.0", optional = true }
 textprep = { version = "0.1.0", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
