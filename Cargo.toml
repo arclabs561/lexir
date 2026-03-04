@@ -11,7 +11,7 @@ homepage = "https://github.com/arclabs561/lexir"
 documentation = "https://github.com/arclabs561/lexir#readme"
 readme = "README.md"
 publish = true
-keywords = ["search", "bm25", "tf-idf", "search"]
+keywords = ["search", "bm25", "tf-idf"]
 categories = ["text-processing", "algorithms"]
 
 [dependencies]

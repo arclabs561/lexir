@@ -44,7 +44,12 @@ fn score_jelinek_mercer(
         let doc_len = index.document_length(doc_id) as f32;
         let tf = index.term_frequency(doc_id, term) as f32;
         let p_corpus = corpus_probability(term, corpus_term_freqs, corpus_size);
-        let p_smoothed = lm_smoothed_p(tf, doc_len, p_corpus, SmoothingMethod::JelinekMercer { lambda });
+        let p_smoothed = lm_smoothed_p(
+            tf,
+            doc_len,
+            p_corpus,
+            SmoothingMethod::JelinekMercer { lambda },
+        );
         if p_smoothed > 0.0 {
             log_score += p_smoothed.ln();
         }
@@ -67,7 +72,12 @@ fn score_dirichlet(
     for term in query_terms {
         let term_freq = index.term_frequency(doc_id, term) as f32;
         let p_corpus = corpus_probability(term, corpus_term_freqs, corpus_size);
-        let p_smoothed = lm_smoothed_p(term_freq, doc_length, p_corpus, SmoothingMethod::Dirichlet { mu });
+        let p_smoothed = lm_smoothed_p(
+            term_freq,
+            doc_length,
+            p_corpus,
+            SmoothingMethod::Dirichlet { mu },
+        );
         if p_smoothed > 0.0 {
             log_score += p_smoothed.ln();
         }

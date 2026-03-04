@@ -69,21 +69,22 @@ fn apply_ops(idx: &mut InvertedIndex, ops: &[LogOp]) {
 }
 
 #[cfg(feature = "cli")]
+fn fnv1a_step(mut h: u64, bytes: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    if h == 0 {
+        h = FNV_OFFSET;
+    }
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
+}
+
+#[cfg(feature = "cli")]
 fn fingerprint(idx: &InvertedIndex) -> u64 {
     // Deterministic FNV-1a 64-bit hash over a stable traversal of the index.
-    fn fnv1a_step(mut h: u64, bytes: &[u8]) -> u64 {
-        const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-        const FNV_PRIME: u64 = 0x100000001b3;
-        if h == 0 {
-            h = FNV_OFFSET;
-        }
-        for &b in bytes {
-            h ^= b as u64;
-            h = h.wrapping_mul(FNV_PRIME);
-        }
-        h
-    }
-
     let mut h: u64 = 0;
     h = fnv1a_step(h, &idx.num_docs().to_le_bytes());
 
