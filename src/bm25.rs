@@ -336,13 +336,21 @@ impl InvertedIndex {
                 continue;
             }
 
-            let mut tf_score = bm25_tf(tf, doc_length, avg_doc_len, params.k1, params.b);
-
-            match params.variant {
-                Bm25Variant::Standard => {}
-                Bm25Variant::BM25L { delta } => tf_score += delta,
-                Bm25Variant::BM25Plus { delta } => tf_score += delta,
-            }
+            let tf_score = match params.variant {
+                Bm25Variant::Standard => bm25_tf(tf, doc_length, avg_doc_len, params.k1, params.b),
+                Bm25Variant::BM25L { delta } => {
+                    // BM25L (Lv & Zhai, 2011): length-normalize TF first,
+                    // add delta, then apply saturation.
+                    let b = params.b.clamp(0.0, 1.0);
+                    let ctf = tf / (1.0 - b + b * doc_length / avg_doc_len.max(1e-9)).max(1e-9);
+                    let tf_l = ctf + delta;
+                    (tf_l * (params.k1 + 1.0)) / (tf_l + params.k1).max(1e-9)
+                }
+                Bm25Variant::BM25Plus { delta } => {
+                    // BM25+ (Lv & Zhai, 2011): standard BM25 TF, then add delta.
+                    bm25_tf(tf, doc_length, avg_doc_len, params.k1, params.b) + delta
+                }
+            };
 
             score += idf * tf_score;
         }
@@ -442,12 +450,18 @@ fn score_optimized(
         if tf == 0.0 {
             continue;
         }
-        let mut tf_score = bm25_tf(tf, doc_length, avg_doc_len, params.k1, params.b);
-        match params.variant {
-            Bm25Variant::Standard => {}
-            Bm25Variant::BM25L { delta } => tf_score += delta,
-            Bm25Variant::BM25Plus { delta } => tf_score += delta,
-        }
+        let tf_score = match params.variant {
+            Bm25Variant::Standard => bm25_tf(tf, doc_length, avg_doc_len, params.k1, params.b),
+            Bm25Variant::BM25L { delta } => {
+                let b = params.b.clamp(0.0, 1.0);
+                let ctf = tf / (1.0 - b + b * doc_length / avg_doc_len.max(1e-9)).max(1e-9);
+                let tf_l = ctf + delta;
+                (tf_l * (params.k1 + 1.0)) / (tf_l + params.k1).max(1e-9)
+            }
+            Bm25Variant::BM25Plus { delta } => {
+                bm25_tf(tf, doc_length, avg_doc_len, params.k1, params.b) + delta
+            }
+        };
         score += idf * tf_score;
     }
     score
@@ -481,5 +495,129 @@ mod tests {
         let mut expected: Vec<u32> = (0..10u32).collect();
         expected.sort_unstable();
         assert_eq!(cands, expected);
+    }
+
+    fn build_test_index() -> InvertedIndex {
+        let mut ix = InvertedIndex::new();
+        // doc 0: short doc, high TF for "neural"
+        ix.add_document(0, &["neural".into(), "neural".into(), "network".into()]);
+        // doc 1: long doc, same terms spread out
+        ix.add_document(
+            1,
+            &[
+                "neural".into(),
+                "network".into(),
+                "deep".into(),
+                "learning".into(),
+                "optimization".into(),
+                "gradient".into(),
+            ],
+        );
+        // doc 2: short, different topic
+        ix.add_document(2, &["cat".into(), "dog".into()]);
+        ix
+    }
+
+    #[test]
+    fn bm25l_differs_from_standard() {
+        let ix = build_test_index();
+        let query = vec!["neural".into()];
+
+        let standard = ix.retrieve(&query, 3, Bm25Params::default()).unwrap();
+        let bm25l = ix.retrieve(&query, 3, Bm25Params::bm25l()).unwrap();
+
+        // Both should return doc 0 and doc 1 (both contain "neural")
+        assert_eq!(standard.len(), 2);
+        assert_eq!(bm25l.len(), 2);
+
+        // BM25L scores should differ from standard
+        let std_score_0 = standard.iter().find(|(id, _)| *id == 0).unwrap().1;
+        let bm25l_score_0 = bm25l.iter().find(|(id, _)| *id == 0).unwrap().1;
+        assert!(
+            (std_score_0 - bm25l_score_0).abs() > 1e-6,
+            "BM25L should produce different scores than Standard: std={}, bm25l={}",
+            std_score_0,
+            bm25l_score_0
+        );
+    }
+
+    #[test]
+    fn bm25l_differs_from_bm25plus() {
+        let ix = build_test_index();
+        let query = vec!["neural".into()];
+
+        let bm25l = ix.retrieve(&query, 3, Bm25Params::bm25l()).unwrap();
+        let bm25plus = ix.retrieve(&query, 3, Bm25Params::bm25plus()).unwrap();
+
+        // Both should return results
+        assert!(!bm25l.is_empty());
+        assert!(!bm25plus.is_empty());
+
+        // BM25L and BM25+ should produce DIFFERENT scores (they are distinct algorithms)
+        let l_score = bm25l[0].1;
+        let plus_score = bm25plus[0].1;
+        assert!(
+            (l_score - plus_score).abs() > 1e-6,
+            "BM25L and BM25+ should differ: l={}, plus={}",
+            l_score,
+            plus_score
+        );
+    }
+
+    #[test]
+    fn bm25plus_adds_delta_to_standard() {
+        let ix = build_test_index();
+        let query = vec!["neural".into()];
+        let delta = 1.0;
+
+        let standard = ix.retrieve(&query, 3, Bm25Params::default()).unwrap();
+        let bm25plus = ix
+            .retrieve(
+                &query,
+                3,
+                Bm25Params {
+                    variant: Bm25Variant::bm25plus_with_delta(delta),
+                    ..Bm25Params::default()
+                },
+            )
+            .unwrap();
+
+        // BM25+ score should be higher than standard (adds delta)
+        let std_score = standard[0].1;
+        let plus_score = bm25plus[0].1;
+        assert!(
+            plus_score > std_score,
+            "BM25+ should score higher: std={}, plus={}",
+            std_score,
+            plus_score
+        );
+    }
+
+    #[test]
+    fn bm25l_reduces_length_penalty() {
+        // BM25L should reduce the length penalty for long documents
+        let ix = build_test_index();
+        let query = vec!["neural".into()];
+
+        let standard = ix.retrieve(&query, 3, Bm25Params::default()).unwrap();
+        let bm25l = ix.retrieve(&query, 3, Bm25Params::bm25l()).unwrap();
+
+        // doc 1 is longer than doc 0. BM25L should penalize length less,
+        // so the score ratio (doc1/doc0) should be higher for BM25L.
+        let std_0 = standard.iter().find(|(id, _)| *id == 0).unwrap().1;
+        let std_1 = standard.iter().find(|(id, _)| *id == 1).unwrap().1;
+        let l_0 = bm25l.iter().find(|(id, _)| *id == 0).unwrap().1;
+        let l_1 = bm25l.iter().find(|(id, _)| *id == 1).unwrap().1;
+
+        let std_ratio = std_1 / std_0;
+        let l_ratio = l_1 / l_0;
+
+        // BM25L should give long docs (doc 1) a relatively higher score
+        assert!(
+            l_ratio > std_ratio,
+            "BM25L should reduce length penalty: std_ratio={}, l_ratio={}",
+            std_ratio,
+            l_ratio
+        );
     }
 }
