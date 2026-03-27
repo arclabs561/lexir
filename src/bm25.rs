@@ -470,6 +470,7 @@ fn score_optimized(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn retrieve_tie_breaks_by_doc_id() {
@@ -619,5 +620,105 @@ mod tests {
             std_ratio,
             l_ratio
         );
+    }
+
+    // -- Property-based tests --
+
+    fn arb_term() -> impl Strategy<Value = String> {
+        "[a-z]{1,6}".prop_map(|s| s)
+    }
+
+    fn arb_doc_terms(min: usize, max: usize) -> impl Strategy<Value = Vec<String>> {
+        prop::collection::vec(arb_term(), min..max)
+    }
+
+    proptest! {
+        #[test]
+        fn score_is_non_negative(
+            doc_terms in arb_doc_terms(1, 10),
+            query_terms in prop::collection::vec(arb_term(), 1..4),
+        ) {
+            let mut ix = InvertedIndex::new();
+            ix.add_document(0, &doc_terms);
+            let score = ix.score(0, &query_terms, Bm25Params::default());
+            prop_assert!(score >= 0.0, "BM25 score must be non-negative, got {}", score);
+        }
+
+        #[test]
+        fn add_document_increments_num_docs(
+            docs in prop::collection::vec(arb_doc_terms(1, 8), 1..10),
+        ) {
+            let mut ix = InvertedIndex::new();
+            for (i, terms) in docs.iter().enumerate() {
+                ix.add_document(i as u32, terms);
+                prop_assert_eq!(ix.num_docs(), (i + 1) as u32);
+            }
+        }
+
+        #[test]
+        fn retrieve_returns_at_most_num_docs(
+            doc_count in 1..8usize,
+            k in 1..20usize,
+        ) {
+            let mut ix = InvertedIndex::new();
+            for i in 0..doc_count {
+                ix.add_document(i as u32, &["shared".into(), format!("unique{i}")]);
+            }
+            let results = ix.retrieve(&["shared".into()], k, Bm25Params::default()).unwrap();
+            prop_assert!(results.len() <= doc_count, "got {} results for {} docs", results.len(), doc_count);
+        }
+
+        #[test]
+        fn results_sorted_by_score_desc(
+            doc_count in 2..8usize,
+        ) {
+            let mut ix = InvertedIndex::new();
+            for i in 0..doc_count {
+                // Varying term frequency so scores differ.
+                let mut terms: Vec<String> = vec!["common".into()];
+                for _ in 0..i {
+                    terms.push("common".into());
+                }
+                terms.push(format!("filler{i}"));
+                ix.add_document(i as u32, &terms);
+            }
+            let results = ix.retrieve(&["common".into()], 20, Bm25Params::default()).unwrap();
+            for w in results.windows(2) {
+                prop_assert!(
+                    w[0].1 >= w[1].1,
+                    "results not sorted: {:?} before {:?}", w[0], w[1],
+                );
+            }
+        }
+
+        #[test]
+        fn superset_terms_score_higher(
+            extra_terms in prop::collection::vec(arb_term(), 1..4),
+        ) {
+            // Two docs with the same length: one has all query terms, the other has a subset.
+            let query: Vec<String> = vec!["alpha".into(), "beta".into()];
+            let mut full_doc: Vec<String> = query.clone();
+            let mut partial_doc: Vec<String> = vec!["alpha".into()];
+
+            // Pad both to the same length with filler terms to control for length normalization.
+            let target_len = full_doc.len() + extra_terms.len();
+            for t in &extra_terms {
+                full_doc.push(t.clone());
+            }
+            while partial_doc.len() < target_len {
+                partial_doc.push("zzzfiller".into());
+            }
+
+            let mut ix = InvertedIndex::new();
+            ix.add_document(0, &full_doc);
+            ix.add_document(1, &partial_doc);
+
+            let score_full = ix.score(0, &query, Bm25Params::default());
+            let score_partial = ix.score(1, &query, Bm25Params::default());
+            prop_assert!(
+                score_full >= score_partial,
+                "full={} should be >= partial={}", score_full, score_partial,
+            );
+        }
     }
 }
