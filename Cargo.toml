@@ -29,6 +29,8 @@ postcard = { version = "1.0", optional = true, features = ["alloc"] }
 assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = "3.10"
+qexpr = "0.1.0"
+qplan = "0.1.0"
 
 [features]
 default = ["persistence"]
