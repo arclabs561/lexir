@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/lexir/badge.svg)](https://docs.rs/lexir)
 [![CI](https://github.com/arclabs561/lexir/actions/workflows/ci.yml/badge.svg)](https://github.com/arclabs561/lexir/actions/workflows/ci.yml)
 
-Lexical IR (BM25, TF‑IDF, Query Likelihood) on top of postings lists.
+Lexical IR on top of postings lists.
 
 **Status**: experimental. This repository is public as a reference implementation; it is not
 currently packaged for `crates.io`.
