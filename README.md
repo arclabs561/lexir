@@ -83,13 +83,4 @@ assert!(!hits.is_empty());
 cargo run --features cli -- <subcommand>
 ```
 
-**Indexing & search**: `index`, `search-index`, `search` (build/search from corpus or saved index).
-
-**Record-log operations** (append-only ops + checkpoint):
-- `log-add`, `log-delete`, `log-search` — incremental updates and search over log
-- `log-checkpoint`, `log-compact`, `log-status` — checkpoint management
-- `log-doctor --root <dir> [--fix]` — repair missing meta files
-- `log-prune --root <dir>` — prune redundant checkpoints
-- `log-scan --root <dir> [--strict]` — validate record log integrity
-- `log-validate --root <dir>` — verify checkpoint + log consistency
-- `log-serve` — serve search over a log-backed index
+Subcommands: `index`, `search-index`, `search` for indexing and search. Record-log operations: `log-add`, `log-delete`, `log-search`, `log-checkpoint`, `log-compact`, `log-status`, `log-doctor`, `log-prune`, `log-scan`, `log-validate`, `log-serve`.
