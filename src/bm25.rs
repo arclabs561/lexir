@@ -157,7 +157,7 @@ impl InvertedIndex {
     /// parent directory after the atomic rename. For non-filesystem backends this
     /// returns `NotSupported`.
     #[cfg(feature = "persistence")]
-    pub fn save_durable<D: durability::DurableDirectory + ?Sized>(
+    pub fn save_durable<D: durability::Directory + ?Sized>(
         &self,
         dir: &D,
         path: &str,
