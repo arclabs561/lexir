@@ -14,6 +14,8 @@ publish = true
 keywords = ["search", "bm25", "tf-idf"]
 categories = ["text-processing", "algorithms"]
 
+[workspace]
+
 [dependencies]
 postings = "0.1.0"
 thiserror = "2.0"
