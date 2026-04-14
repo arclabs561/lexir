@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 #[cfg(feature = "cli")]
 use durability::recordlog::{RecordLogReadMode, RecordLogReader, RecordLogWriter};
 #[cfg(feature = "cli")]
-use durability::Directory;
+use durability::storage::Directory;
 #[cfg(feature = "cli")]
 use lexir::bm25::{Bm25Params, InvertedIndex};
 #[cfg(feature = "cli")]

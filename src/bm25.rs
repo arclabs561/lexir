@@ -140,7 +140,7 @@ impl InvertedIndex {
 
     /// Save the index using `durability` (crash-safe atomic write).
     #[cfg(feature = "persistence")]
-    pub fn save<D: durability::Directory + ?Sized>(
+    pub fn save<D: durability::storage::Directory + ?Sized>(
         &self,
         dir: &D,
         path: &str,
@@ -157,7 +157,7 @@ impl InvertedIndex {
     /// parent directory after the atomic rename. For non-filesystem backends this
     /// returns `NotSupported`.
     #[cfg(feature = "persistence")]
-    pub fn save_durable<D: durability::Directory + ?Sized>(
+    pub fn save_durable<D: durability::storage::Directory + ?Sized>(
         &self,
         dir: &D,
         path: &str,
@@ -170,7 +170,7 @@ impl InvertedIndex {
 
     /// Load an index using `durability`.
     #[cfg(feature = "persistence")]
-    pub fn load<D: durability::Directory + ?Sized>(
+    pub fn load<D: durability::storage::Directory + ?Sized>(
         dir: &D,
         path: &str,
     ) -> Result<Self, Box<dyn std::error::Error>>
