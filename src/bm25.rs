@@ -1,6 +1,6 @@
 //! Okapi BM25 over `postings::PostingsIndex`.
 //!
-//! This is the shared “lexical scorer” used by Tekne crates that want BM25:
+//! Shared lexical scorer for crates that want BM25:
 //! - candidate generation comes from `postings` (with bailout support)
 //! - scoring is standard BM25 with optional BM25L/BM25+ variants
 //! - ranking is deterministic (score desc, then doc_id asc)

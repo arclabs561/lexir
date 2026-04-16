@@ -1,6 +1,6 @@
 //! `lexir`: lexical IR built on `postings`.
 //!
-//! This crate is meant to be the **shared** Tekne “lexical retrieval” building block:
+//! Lexical retrieval built on `postings`:
 //! - `postings` provides postings lists + candidate planning (no false negatives).
 //! - `lexir` provides **scoring + ranking** (BM25 / TF-IDF) over `postings`.
 //!
