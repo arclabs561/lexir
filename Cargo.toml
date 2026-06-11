@@ -41,3 +41,8 @@ fuzzy = ["dep:gramdex"]
 persistence = ["dep:durability", "dep:serde", "postings/persistence"]
 recordlog = ["persistence", "dep:postcard"]
 cli = ["dep:clap", "dep:textprep", "recordlog"]
+
+[[bin]]
+name = "lexir"
+test = false
+path = "src/bin/lexir.rs"
