@@ -6,8 +6,7 @@
 
 Lexical IR on top of postings lists.
 
-**Status**: experimental. This repository is public as a reference implementation; it is not
-currently packaged for `crates.io`.
+**Status**: experimental. Published on `crates.io`; the API may still shift.
 
 ## Feature Selection
 
@@ -20,11 +19,11 @@ currently packaged for `crates.io`.
 
 ## Building
 
-`lexir` is not on `crates.io` yet; use a git dependency:
+Add from `crates.io`:
 
 ```toml
 [dependencies]
-lexir = { git = "https://github.com/arclabs561/lexir" }
+lexir = "0.1"
 ```
 
 Notes:
