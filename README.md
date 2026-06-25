@@ -73,7 +73,7 @@ assert!(!hits.is_empty());
 
 Runnable examples live in [`examples/`](examples/):
 
-- `query_pipeline` runs the full IR query pipeline end to end: `qexpr` -> `qplan` -> `lexir` BM25 retrieval.
+- `query_pipeline` runs the full lexical-search pipeline end to end (`qexpr` -> `qplan` -> `lexir` BM25 retrieval), the path a query takes through a classic search backend.
 
 ## Features
 
