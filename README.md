@@ -69,6 +69,12 @@ let hits = retrieve_query_likelihood(&idx, &["hello".to_string()], 10, QueryLike
 assert!(!hits.is_empty());
 ```
 
+## Examples
+
+Runnable examples live in [`examples/`](examples/):
+
+- `query_pipeline` runs the full IR query pipeline end to end: `qexpr` -> `qplan` -> `lexir` BM25 retrieval.
+
 ## Features
 
 - `persistence` (default): save/load via `durability` + `postings/persistence`
