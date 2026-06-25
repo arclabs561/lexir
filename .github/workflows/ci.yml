@@ -26,6 +26,8 @@ jobs:
 
       - name: test (default)
         run: cargo test --all-targets
+      - name: run example assertions
+        run: cargo run --example readme_examples
 
       - name: test (all features)
         run: cargo test --all-targets --all-features
