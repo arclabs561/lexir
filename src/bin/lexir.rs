@@ -155,18 +155,6 @@ fn require_meta_or_abort(
 }
 
 #[cfg(feature = "cli")]
-fn read_ops_best_effort(
-    dir: Arc<dyn Directory>,
-    log: &str,
-) -> Result<Vec<LogOp>, Box<dyn std::error::Error>> {
-    if !dir.exists(log) {
-        return Ok(Vec::new());
-    }
-    let reader = RecordLogReader::new(dir, log.to_string());
-    Ok(reader.read_all_postcard(RecordLogReadMode::BestEffort)?)
-}
-
-#[cfg(feature = "cli")]
 fn read_ops(
     dir: Arc<dyn Directory>,
     log: &str,
@@ -177,6 +165,137 @@ fn read_ops(
     }
     let reader = RecordLogReader::new(dir, log.to_string());
     Ok(reader.read_all_postcard(mode)?)
+}
+
+#[cfg(feature = "cli")]
+fn dir_arc(root: &Path) -> Result<Arc<dyn Directory>, Box<dyn std::error::Error>> {
+    Ok(Arc::new(durability::FsDirectory::new(root)?))
+}
+
+#[cfg(feature = "cli")]
+fn load_checkpoint_or_empty(
+    dir: &durability::FsDirectory,
+    checkpoint: &str,
+) -> Result<InvertedIndex, Box<dyn std::error::Error>> {
+    if dir.exists(checkpoint) {
+        Ok(InvertedIndex::load(dir, checkpoint)?)
+    } else {
+        Ok(InvertedIndex::new())
+    }
+}
+
+#[cfg(feature = "cli")]
+struct RecoveredLogState {
+    idx: InvertedIndex,
+    ops: Vec<LogOp>,
+    directory: Arc<dyn Directory>,
+    meta: LogMeta,
+}
+
+#[cfg(feature = "cli")]
+fn recover_checkpoint_plus_suffix(
+    root: &Path,
+    dir: &durability::FsDirectory,
+    checkpoint: &str,
+    log: &str,
+    mode: RecordLogReadMode,
+) -> Result<RecoveredLogState, Box<dyn std::error::Error>> {
+    let arc = dir_arc(root)?;
+    let ops: Vec<LogOp> = read_ops(arc.clone(), log, mode)?;
+    let meta = require_meta_or_abort(dir, checkpoint, log, ops.len())?;
+    let mut idx = load_checkpoint_or_empty(dir, checkpoint)?;
+    apply_ops(&mut idx, &ops[meta.applied_records..]);
+    Ok(RecoveredLogState {
+        idx,
+        ops,
+        directory: arc,
+        meta,
+    })
+}
+
+#[cfg(feature = "cli")]
+fn compacted_ops(ops: &[LogOp]) -> Vec<LogOp> {
+    // Materialize final state per doc id. A missing value means the final op for
+    // that id is a delete, so the compacted self-contained log omits it.
+    let mut final_state: BTreeMap<u32, Option<Vec<String>>> = BTreeMap::new();
+    for op in ops {
+        match op {
+            LogOp::Add { doc_id, terms } => {
+                final_state.insert(*doc_id, Some(terms.clone()));
+            }
+            LogOp::Delete { doc_id } => {
+                final_state.insert(*doc_id, None);
+            }
+        }
+    }
+
+    final_state
+        .into_iter()
+        .filter_map(|(doc_id, maybe_terms)| maybe_terms.map(|terms| LogOp::Add { doc_id, terms }))
+        .collect()
+}
+
+#[cfg(feature = "cli")]
+fn rewrite_log(
+    dir: &durability::FsDirectory,
+    arc: Arc<dyn Directory>,
+    log: &str,
+    ops: &[LogOp],
+    durable: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if ops.is_empty() {
+        if dir.exists(log) {
+            dir.delete(log)?;
+        }
+        return Ok(());
+    }
+
+    let tmp_log = format!("{log}.tmp");
+    if dir.exists(&tmp_log) {
+        dir.delete(&tmp_log)?;
+    }
+    let mut w = RecordLogWriter::new(arc, tmp_log.clone());
+    for op in ops {
+        w.append_postcard(op)?;
+    }
+    if durable {
+        w.flush_and_sync()?;
+        dir.atomic_rename_durable(&tmp_log, log)?;
+    } else {
+        w.flush()?;
+        dir.atomic_rename(&tmp_log, log)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cli")]
+fn rewrite_materialized_log(
+    dir: &durability::FsDirectory,
+    arc: Arc<dyn Directory>,
+    checkpoint: &str,
+    log: &str,
+    ops: &[LogOp],
+    durable: bool,
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    let old_ops_len = ops.len();
+    let new_ops = compacted_ops(ops);
+
+    rewrite_log(dir, arc, log, &new_ops, durable)?;
+
+    let mut idx = InvertedIndex::new();
+    apply_ops(&mut idx, &new_ops);
+    if durable {
+        idx.save_durable(dir, checkpoint)?;
+    } else {
+        idx.save(dir, checkpoint)?;
+    }
+
+    let meta = LogMeta {
+        applied_records: new_ops.len(),
+    };
+    write_meta(dir, checkpoint, &meta, durable)?;
+
+    Ok((old_ops_len, new_ops.len()))
 }
 
 #[cfg(feature = "cli")]
@@ -635,24 +754,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 durable,
             } => {
                 let dir = durability::FsDirectory::new(&root)?;
-                let mut idx = if dir.exists(&checkpoint) {
-                    InvertedIndex::load(&dir, &checkpoint)?
-                } else {
-                    InvertedIndex::new()
-                };
-
-                // Replay *suffix* ops (those not yet included in the checkpoint).
-                let arc: Arc<dyn Directory> = Arc::new(durability::FsDirectory::new(&root)?);
-                let ops: Vec<LogOp> = read_ops_best_effort(arc.clone(), &log)?;
-                let meta = require_meta_or_abort(&dir, &checkpoint, &log, ops.len())?;
-                apply_ops(&mut idx, &ops[meta.applied_records..]);
+                let RecoveredLogState {
+                    mut idx,
+                    ops,
+                    directory,
+                    ..
+                } = recover_checkpoint_plus_suffix(
+                    &root,
+                    &dir,
+                    &checkpoint,
+                    &log,
+                    RecordLogReadMode::BestEffort,
+                )?;
 
                 // Apply new op.
                 let terms: Vec<String> = text.split_whitespace().map(|s| s.to_string()).collect();
                 idx.add_document(doc_id, &terms);
 
                 // Append to log.
-                let mut w = RecordLogWriter::new(arc, log);
+                let mut w = RecordLogWriter::new(directory, log);
                 w.append_postcard(&LogOp::Add { doc_id, terms })?;
                 if durable {
                     w.flush_and_sync()?;
@@ -683,20 +803,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 durable,
             } => {
                 let dir = durability::FsDirectory::new(&root)?;
-                let mut idx = if dir.exists(&checkpoint) {
-                    InvertedIndex::load(&dir, &checkpoint)?
-                } else {
-                    InvertedIndex::new()
-                };
-
-                let arc: Arc<dyn Directory> = Arc::new(durability::FsDirectory::new(&root)?);
-                let ops: Vec<LogOp> = read_ops_best_effort(arc.clone(), &log)?;
-                let meta = require_meta_or_abort(&dir, &checkpoint, &log, ops.len())?;
-                apply_ops(&mut idx, &ops[meta.applied_records..]);
+                let RecoveredLogState {
+                    mut idx,
+                    ops,
+                    directory,
+                    ..
+                } = recover_checkpoint_plus_suffix(
+                    &root,
+                    &dir,
+                    &checkpoint,
+                    &log,
+                    RecordLogReadMode::BestEffort,
+                )?;
 
                 let existed = idx.delete_document(doc_id);
 
-                let mut w = RecordLogWriter::new(arc, log);
+                let mut w = RecordLogWriter::new(directory, log);
                 w.append_postcard(&LogOp::Delete { doc_id })?;
                 if durable {
                     w.flush_and_sync()?;
@@ -726,21 +848,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 query,
             } => {
                 let dir = durability::FsDirectory::new(&root)?;
-                let mut idx = if dir.exists(&checkpoint) {
-                    InvertedIndex::load(&dir, &checkpoint)?
-                } else {
-                    InvertedIndex::new()
-                };
-
-                let arc: Arc<dyn Directory> = Arc::new(durability::FsDirectory::new(&root)?);
                 let mode = if strict {
                     RecordLogReadMode::Strict
                 } else {
                     RecordLogReadMode::BestEffort
                 };
-                let ops: Vec<LogOp> = read_ops(arc, &log, mode)?;
-                let meta = require_meta_or_abort(&dir, &checkpoint, &log, ops.len())?;
-                apply_ops(&mut idx, &ops[meta.applied_records..]);
+                let RecoveredLogState { idx, .. } =
+                    recover_checkpoint_plus_suffix(&root, &dir, &checkpoint, &log, mode)?;
 
                 let results = idx.retrieve(&query, k, Bm25Params::default())?;
                 println!("Results for {:?}:", query);
@@ -757,21 +871,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 strict,
             } => {
                 let dir = durability::FsDirectory::new(&root)?;
-                let mut idx = if dir.exists(&checkpoint) {
-                    InvertedIndex::load(&dir, &checkpoint)?
-                } else {
-                    InvertedIndex::new()
-                };
-
-                let arc: Arc<dyn Directory> = Arc::new(durability::FsDirectory::new(&root)?);
                 let mode = if strict {
                     RecordLogReadMode::Strict
                 } else {
                     RecordLogReadMode::BestEffort
                 };
-                let ops: Vec<LogOp> = read_ops(arc, &log, mode)?;
-                let meta = require_meta_or_abort(&dir, &checkpoint, &log, ops.len())?;
-                apply_ops(&mut idx, &ops[meta.applied_records..]);
+                let RecoveredLogState { idx, ops, .. } =
+                    recover_checkpoint_plus_suffix(&root, &dir, &checkpoint, &log, mode)?;
 
                 if durable {
                     idx.save_durable(&dir, &checkpoint)?;
@@ -805,7 +911,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 strict,
             } => {
                 let dir = durability::FsDirectory::new(&root)?;
-                let arc: Arc<dyn Directory> = Arc::new(durability::FsDirectory::new(&root)?);
+                let arc = dir_arc(&root)?;
                 let mode = if strict {
                     RecordLogReadMode::Strict
                 } else {
@@ -873,7 +979,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 strict,
             } => {
                 let dir = durability::FsDirectory::new(&root)?;
-                let arc: Arc<dyn Directory> = Arc::new(durability::FsDirectory::new(&root)?);
+                let arc = dir_arc(&root)?;
                 let mode = if strict {
                     RecordLogReadMode::Strict
                 } else {
@@ -960,76 +1066,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 strict,
             } => {
                 let dir = durability::FsDirectory::new(&root)?;
-                let arc: Arc<dyn Directory> = Arc::new(durability::FsDirectory::new(&root)?);
+                let arc = dir_arc(&root)?;
                 let mode = if strict {
                     RecordLogReadMode::Strict
                 } else {
                     RecordLogReadMode::BestEffort
                 };
                 let ops: Vec<LogOp> = read_ops(arc.clone(), &log, mode)?;
-                let old_ops_len = ops.len();
-
-                // Track final state per doc id (None = deleted).
-                let mut final_state: BTreeMap<u32, Option<Vec<String>>> = BTreeMap::new();
-                for op in &ops {
-                    match op {
-                        LogOp::Add { doc_id, terms } => {
-                            final_state.insert(*doc_id, Some(terms.clone()));
-                        }
-                        LogOp::Delete { doc_id } => {
-                            final_state.insert(*doc_id, None);
-                        }
-                    }
-                }
-
-                let mut new_ops: Vec<LogOp> = Vec::new();
-                for (doc_id, maybe_terms) in final_state {
-                    if let Some(terms) = maybe_terms {
-                        new_ops.push(LogOp::Add { doc_id, terms });
-                    }
-                }
-
-                // Rewrite log (or delete it if empty).
-                if new_ops.is_empty() {
-                    if dir.exists(&log) {
-                        dir.delete(&log)?;
-                    }
-                } else {
-                    let tmp_log = format!("{log}.tmp");
-                    if dir.exists(&tmp_log) {
-                        dir.delete(&tmp_log)?;
-                    }
-                    let mut w = RecordLogWriter::new(arc.clone(), tmp_log.clone());
-                    for op in &new_ops {
-                        w.append_postcard(op)?;
-                    }
-                    if durable {
-                        w.flush_and_sync()?;
-                        dir.atomic_rename_durable(&tmp_log, &log)?;
-                    } else {
-                        w.flush()?;
-                        dir.atomic_rename(&tmp_log, &log)?;
-                    }
-                }
-
-                // Write a fresh checkpoint consistent with the compacted log.
-                let mut idx = InvertedIndex::new();
-                apply_ops(&mut idx, &new_ops);
-                if durable {
-                    idx.save_durable(&dir, &checkpoint)?;
-                } else {
-                    idx.save(&dir, &checkpoint)?;
-                }
-
-                let meta = LogMeta {
-                    applied_records: new_ops.len(),
-                };
-                write_meta(&dir, &checkpoint, &meta, durable)?;
+                let (old_ops_len, new_ops_len) =
+                    rewrite_materialized_log(&dir, arc, &checkpoint, &log, &ops, durable)?;
 
                 println!(
                     "ok: compacted log (old_records={} new_records={})",
-                    old_ops_len,
-                    new_ops.len()
+                    old_ops_len, new_ops_len
                 );
             }
             Commands::LogPrune {
@@ -1039,82 +1088,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 durable,
                 strict,
             } => {
-                // Implemented as a “rebase/compact” to preserve `log-validate` semantics.
+                // Implemented as a rebase/compact to preserve `log-validate` semantics.
                 let dir = durability::FsDirectory::new(&root)?;
-                let arc: Arc<dyn Directory> = Arc::new(durability::FsDirectory::new(&root)?);
+                let arc = dir_arc(&root)?;
                 let mode = if strict {
                     RecordLogReadMode::Strict
                 } else {
                     RecordLogReadMode::BestEffort
                 };
                 let ops: Vec<LogOp> = read_ops(arc.clone(), &log, mode)?;
-                let old_ops_len = ops.len();
-
-                // Track final state per doc id (None = deleted).
-                let mut final_state: BTreeMap<u32, Option<Vec<String>>> = BTreeMap::new();
-                for op in &ops {
-                    match op {
-                        LogOp::Add { doc_id, terms } => {
-                            final_state.insert(*doc_id, Some(terms.clone()));
-                        }
-                        LogOp::Delete { doc_id } => {
-                            final_state.insert(*doc_id, None);
-                        }
-                    }
-                }
-
-                let mut new_ops: Vec<LogOp> = Vec::new();
-                for (doc_id, maybe_terms) in final_state {
-                    if let Some(terms) = maybe_terms {
-                        new_ops.push(LogOp::Add { doc_id, terms });
-                    }
-                }
-
-                // Rewrite log (or delete it if empty).
-                if new_ops.is_empty() {
-                    if dir.exists(&log) {
-                        dir.delete(&log)?;
-                    }
-                } else {
-                    let tmp_log = format!("{log}.tmp");
-                    if dir.exists(&tmp_log) {
-                        dir.delete(&tmp_log)?;
-                    }
-                    let mut w = RecordLogWriter::new(arc.clone(), tmp_log.clone());
-                    for op in &new_ops {
-                        w.append_postcard(op)?;
-                    }
-                    if durable {
-                        w.flush_and_sync()?;
-                        dir.atomic_rename_durable(&tmp_log, &log)?;
-                    } else {
-                        w.flush()?;
-                        dir.atomic_rename(&tmp_log, &log)?;
-                    }
-                }
-
-                // Write a fresh checkpoint consistent with the rewritten log.
-                let mut idx = InvertedIndex::new();
-                apply_ops(&mut idx, &new_ops);
-                if durable {
-                    idx.save_durable(&dir, &checkpoint)?;
-                } else {
-                    idx.save(&dir, &checkpoint)?;
-                }
-
-                let meta = LogMeta {
-                    applied_records: new_ops.len(),
-                };
-                write_meta(&dir, &checkpoint, &meta, durable)?;
+                let (old_ops_len, new_ops_len) =
+                    rewrite_materialized_log(&dir, arc, &checkpoint, &log, &ops, durable)?;
 
                 println!(
                     "ok: pruned history (old_records={} new_records={})",
-                    old_ops_len,
-                    new_ops.len()
+                    old_ops_len, new_ops_len
                 );
             }
             Commands::LogScan { root, log, strict } => {
-                let arc: Arc<dyn Directory> = Arc::new(durability::FsDirectory::new(&root)?);
+                let arc = dir_arc(&root)?;
                 let mode = if strict {
                     RecordLogReadMode::Strict
                 } else {
@@ -1130,22 +1122,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 strict,
             } => {
                 let dir = durability::FsDirectory::new(&root)?;
-                let arc: Arc<dyn Directory> = Arc::new(durability::FsDirectory::new(&root)?);
                 let mode = if strict {
                     RecordLogReadMode::Strict
                 } else {
                     RecordLogReadMode::BestEffort
                 };
-                let ops: Vec<LogOp> = read_ops(arc, &log, mode)?;
-
-                let meta = require_meta_or_abort(&dir, &checkpoint, &log, ops.len())?;
-
-                let mut idx_ckpt = if dir.exists(&checkpoint) {
-                    InvertedIndex::load(&dir, &checkpoint)?
-                } else {
-                    InvertedIndex::new()
-                };
-                apply_ops(&mut idx_ckpt, &ops[meta.applied_records..]);
+                let RecoveredLogState {
+                    idx: idx_ckpt,
+                    ops,
+                    meta,
+                    ..
+                } = recover_checkpoint_plus_suffix(&root, &dir, &checkpoint, &log, mode)?;
                 let fp_ckpt = fingerprint(&idx_ckpt);
 
                 let mut idx_full = InvertedIndex::new();

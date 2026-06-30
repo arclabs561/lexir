@@ -101,6 +101,63 @@ fn log_prune_preserves_validate() {
 }
 
 #[test]
+fn log_compact_preserves_deletes_and_search() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+
+    for (id, text) in [("1", "alpha live"), ("2", "alpha stale")] {
+        lexir()
+            .args([
+                "log-add",
+                "--root",
+                root.to_str().unwrap(),
+                "--doc-id",
+                id,
+                "--text",
+                text,
+            ])
+            .assert()
+            .success();
+    }
+
+    lexir()
+        .args([
+            "log-delete",
+            "--root",
+            root.to_str().unwrap(),
+            "--doc-id",
+            "2",
+        ])
+        .assert()
+        .success();
+
+    lexir()
+        .args(["log-compact", "--root", root.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "ok: compacted log (old_records=3 new_records=1)",
+        ));
+
+    lexir()
+        .args(["log-validate", "--root", root.to_str().unwrap()])
+        .assert()
+        .success();
+
+    lexir()
+        .args([
+            "log-search",
+            "--root",
+            root.to_str().unwrap(),
+            "--",
+            "alpha",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Doc 1").and(predicate::str::contains("Doc 2").not()));
+}
+
+#[test]
 fn torn_tail_best_effort_scan_succeeds_strict_fails() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
