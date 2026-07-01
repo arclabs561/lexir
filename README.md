@@ -23,13 +23,14 @@ Add from `crates.io`:
 
 ```toml
 [dependencies]
-lexir = "0.1"
+lexir = "0.1.4"
 ```
 
 Notes:
 
-- `postings`, `rankfns`, and `durability` are pulled as git dependencies.
-- `gramdex` and `textprep` are pulled from `crates.io` (and are only used when their features are enabled).
+- Optional persistence, CLI, and fuzzy-search dependencies are enabled only by
+  their feature flags.
+- The `fuzzy` feature uses `gramdex` for k-gram candidate generation.
 
 ## Usage (library)
 
