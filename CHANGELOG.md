@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Bumped the `postings` dependency to 0.1.8.
+
 ### Removed
 - `query_pipeline` example and its `qexpr` / `qplan` dev-dependencies (both crates retired).
 
