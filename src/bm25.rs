@@ -336,21 +336,7 @@ impl InvertedIndex {
                 continue;
             }
 
-            let tf_score = match params.variant {
-                Bm25Variant::Standard => bm25_tf(tf, doc_length, avg_doc_len, params.k1, params.b),
-                Bm25Variant::BM25L { delta } => {
-                    // BM25L (Lv & Zhai, 2011): length-normalize TF first,
-                    // add delta, then apply saturation.
-                    let b = params.b.clamp(0.0, 1.0);
-                    let ctf = tf / (1.0 - b + b * doc_length / avg_doc_len.max(1e-9)).max(1e-9);
-                    let tf_l = ctf + delta;
-                    (tf_l * (params.k1 + 1.0)) / (tf_l + params.k1).max(1e-9)
-                }
-                Bm25Variant::BM25Plus { delta } => {
-                    // BM25+ (Lv & Zhai, 2011): standard BM25 TF, then add delta.
-                    bm25_tf(tf, doc_length, avg_doc_len, params.k1, params.b) + delta
-                }
-            };
+            let tf_score = bm25_tf_score(tf, doc_length, avg_doc_len, params);
 
             score += idf * tf_score;
         }
@@ -379,94 +365,102 @@ impl InvertedIndex {
         }
 
         self.ensure_idf_computed();
-        let query_idfs: Vec<f32> = query_terms.iter().map(|t| self.idf(t)).collect();
-        let candidates = self.candidates(query_terms);
+        let mut touched_upper_bound = 0usize;
+        let query_idfs: Vec<f32> = query_terms
+            .iter()
+            .map(|term| {
+                let idf = self.idf(term);
+                if idf != 0.0 {
+                    touched_upper_bound =
+                        touched_upper_bound.saturating_add(self.postings.df(term) as usize);
+                }
+                idf
+            })
+            .collect();
         let avg_doc_len = self.postings.avg_doc_len();
         if avg_doc_len == 0.0 {
             return Ok(Vec::new());
         }
 
-        // Min-heap top-k.
-        use std::cmp::Reverse;
-        use std::collections::BinaryHeap;
-
-        #[derive(PartialEq)]
-        struct FloatOrd(f32);
-        impl Eq for FloatOrd {}
-        impl PartialOrd for FloatOrd {
-            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-                Some(self.cmp(other))
-            }
-        }
-        impl Ord for FloatOrd {
-            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-                self.0
-                    .partial_cmp(&other.0)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            }
-        }
-
-        let mut heap: BinaryHeap<Reverse<(FloatOrd, u32)>> = BinaryHeap::with_capacity(k + 1);
-        for doc_id in candidates {
-            let score =
-                score_optimized(self, doc_id, query_terms, &query_idfs, params, avg_doc_len);
-            if !score.is_finite() || score <= 0.0 {
+        let mut scores = HashMap::with_capacity(touched_upper_bound.min(self.num_docs() as usize));
+        for (term, &idf) in query_terms.iter().zip(query_idfs.iter()) {
+            if idf == 0.0 {
                 continue;
             }
-            if heap.len() < k {
-                heap.push(Reverse((FloatOrd(score), doc_id)));
-            } else if let Some(&Reverse((FloatOrd(min_score), _))) = heap.peek() {
-                if score > min_score {
-                    heap.pop();
-                    heap.push(Reverse((FloatOrd(score), doc_id)));
+
+            for (doc_id, tf) in self.postings.postings_iter(term) {
+                let doc_length = self.postings.document_len(doc_id) as f32;
+                let tf_score = bm25_tf_score(tf as f32, doc_length, avg_doc_len, params);
+                let contribution = idf * tf_score;
+                if contribution != 0.0 {
+                    *scores.entry(doc_id).or_insert(0.0) += contribution;
                 }
             }
         }
 
-        let mut results: Vec<(u32, f32)> = heap
-            .into_iter()
-            .map(|Reverse((FloatOrd(score), doc_id))| (doc_id, score))
-            .collect();
-
-        // Deterministic: score desc, then doc_id asc.
-        results.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        Ok(results)
+        Ok(top_k_scored_docs(scores, k))
     }
 }
 
-fn score_optimized(
-    index: &InvertedIndex,
-    doc_id: u32,
-    query_terms: &[String],
-    query_idfs: &[f32],
-    params: Bm25Params,
-    avg_doc_len: f32,
-) -> f32 {
-    let doc_length = index.postings.document_len(doc_id) as f32;
-    let mut score = 0.0;
-    for (term, &idf) in query_terms.iter().zip(query_idfs.iter()) {
-        if idf == 0.0 {
-            continue;
+fn bm25_tf_score(tf: f32, doc_length: f32, avg_doc_len: f32, params: Bm25Params) -> f32 {
+    match params.variant {
+        Bm25Variant::Standard => bm25_tf(tf, doc_length, avg_doc_len, params.k1, params.b),
+        Bm25Variant::BM25L { delta } => {
+            // BM25L (Lv & Zhai, 2011): length-normalize TF first,
+            // add delta, then apply saturation.
+            let b = params.b.clamp(0.0, 1.0);
+            let ctf = tf / (1.0 - b + b * doc_length / avg_doc_len.max(1e-9)).max(1e-9);
+            let tf_l = ctf + delta;
+            (tf_l * (params.k1 + 1.0)) / (tf_l + params.k1).max(1e-9)
         }
-        let tf = index.postings.term_frequency(doc_id, term) as f32;
-        if tf == 0.0 {
-            continue;
+        Bm25Variant::BM25Plus { delta } => {
+            // BM25+ (Lv & Zhai, 2011): standard BM25 TF, then add delta.
+            bm25_tf(tf, doc_length, avg_doc_len, params.k1, params.b) + delta
         }
-        let tf_score = match params.variant {
-            Bm25Variant::Standard => bm25_tf(tf, doc_length, avg_doc_len, params.k1, params.b),
-            Bm25Variant::BM25L { delta } => {
-                let b = params.b.clamp(0.0, 1.0);
-                let ctf = tf / (1.0 - b + b * doc_length / avg_doc_len.max(1e-9)).max(1e-9);
-                let tf_l = ctf + delta;
-                (tf_l * (params.k1 + 1.0)) / (tf_l + params.k1).max(1e-9)
-            }
-            Bm25Variant::BM25Plus { delta } => {
-                bm25_tf(tf, doc_length, avg_doc_len, params.k1, params.b) + delta
-            }
-        };
-        score += idf * tf_score;
     }
-    score
+}
+
+#[inline]
+fn cmp_doc_scores(a: &(u32, f32), b: &(u32, f32)) -> std::cmp::Ordering {
+    b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0))
+}
+
+fn top_k_scored_docs<I>(docs: I, k: usize) -> Vec<(u32, f32)>
+where
+    I: IntoIterator<Item = (u32, f32)>,
+{
+    if k == 0 {
+        return Vec::new();
+    }
+
+    let mut ranked: Vec<(u32, f32)> = Vec::with_capacity(k);
+    let mut sorted = false;
+    for doc in docs {
+        if !doc.1.is_finite() || doc.1 <= 0.0 {
+            continue;
+        }
+        if ranked.len() < k {
+            ranked.push(doc);
+            continue;
+        }
+        if !sorted {
+            ranked.sort_by(cmp_doc_scores);
+            sorted = true;
+        }
+        if cmp_doc_scores(&doc, ranked.last().expect("top-k buffer is full")).is_lt() {
+            let last = ranked.len() - 1;
+            ranked[last] = doc;
+            let mut i = last;
+            while i > 0 && cmp_doc_scores(&ranked[i], &ranked[i - 1]).is_lt() {
+                ranked.swap(i, i - 1);
+                i -= 1;
+            }
+        }
+    }
+    if !sorted {
+        ranked.sort_by(cmp_doc_scores);
+    }
+    ranked
 }
 
 #[cfg(test)]
@@ -635,6 +629,32 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn retrieve_matches_exhaustive_score_sort(
+            docs in prop::collection::vec(arb_doc_terms(0, 10), 1..12),
+            query_terms in prop::collection::vec(arb_term(), 1..5),
+            k in 0usize..20,
+        ) {
+            let mut ix = InvertedIndex::new();
+            for (doc_id, terms) in docs.iter().enumerate() {
+                ix.add_document(doc_id as u32, terms);
+            }
+
+            let mut expected: Vec<(u32, f32)> = ix
+                .document_ids()
+                .filter_map(|doc_id| {
+                    let score = ix.score(doc_id, &query_terms, Bm25Params::default());
+                    (score.is_finite() && score > 0.0).then_some((doc_id, score))
+                })
+                .collect();
+            expected.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            expected.truncate(k);
+
+            let got = ix.retrieve(&query_terms, k, Bm25Params::default()).unwrap();
+
+            prop_assert_eq!(got, expected);
+        }
+
         #[test]
         fn score_is_non_negative(
             doc_terms in arb_doc_terms(1, 10),
