@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Sped up TF-IDF retrieval by accumulating scores directly from postings lists
+  instead of materializing candidates and then doing per-document term-frequency
+  lookups. Current timings on the retrieval benchmark are
+  `tfidf_retrieve/terms/2` at `[768.07 us 769.63 us 771.25 us]` and
+  `tfidf_retrieve/terms/8` at `[2.4533 ms 2.4594 ms 2.4657 ms]`.
+
 ## [0.1.5] - 2026-07-02
 
 ### Added

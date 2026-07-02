@@ -391,7 +391,7 @@ impl InvertedIndex {
             }
         }
 
-        Ok(top_k_scored_docs(scores, k))
+        Ok(top_k_positive_scored_docs(scores, k))
     }
 }
 
@@ -418,7 +418,7 @@ fn cmp_doc_scores(a: &(u32, f32), b: &(u32, f32)) -> std::cmp::Ordering {
     b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0))
 }
 
-fn top_k_scored_docs<I>(docs: I, k: usize) -> Vec<(u32, f32)>
+pub(crate) fn top_k_positive_scored_docs<I>(docs: I, k: usize) -> Vec<(u32, f32)>
 where
     I: IntoIterator<Item = (u32, f32)>,
 {

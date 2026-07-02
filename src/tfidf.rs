@@ -6,9 +6,10 @@
 //! References:
 //! - Spärck Jones (1972): term specificity / IDF motivation.
 
-use crate::bm25::InvertedIndex;
+use crate::bm25::{top_k_positive_scored_docs, InvertedIndex};
 use crate::Error;
 use rankfns::{idf_transform, tf_transform, IdfVariant, TfVariant};
+use std::collections::HashMap;
 
 /// TF-IDF parameters.
 #[derive(Debug, Clone, Copy)]
@@ -88,19 +89,36 @@ pub fn retrieve_tfidf(
         return Ok(Vec::new());
     }
 
-    let candidates = index.candidates(query_terms);
-    let mut scored: Vec<(u32, f32)> = candidates
-        .into_iter()
-        .map(|doc_id| (doc_id, score_tfidf(index, doc_id, query_terms, params)))
-        .filter(|(_, score)| score.is_finite() && *score > 0.0)
+    let num_docs = index.num_docs();
+    let mut touched_upper_bound = 0usize;
+    let query_idfs: Vec<f32> = query_terms
+        .iter()
+        .map(|term| {
+            let df = index.doc_frequency(term);
+            let idf = idf_transform(num_docs, df, params.idf_variant);
+            if idf != 0.0 {
+                touched_upper_bound = touched_upper_bound.saturating_add(df as usize);
+            }
+            idf
+        })
         .collect();
 
-    // Deterministic: score desc, then doc_id asc.
-    scored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    if scored.len() > k {
-        scored.truncate(k);
+    let mut scores = HashMap::with_capacity(touched_upper_bound.min(num_docs as usize));
+    for (term, &idf) in query_terms.iter().zip(query_idfs.iter()) {
+        if idf == 0.0 {
+            continue;
+        }
+
+        for (doc_id, tf_count) in index.postings_iter(term) {
+            let tf = tf_transform(tf_count, params.tf_variant);
+            let contribution = tf * idf;
+            if contribution != 0.0 {
+                *scores.entry(doc_id).or_insert(0.0) += contribution;
+            }
+        }
     }
-    Ok(scored)
+
+    Ok(top_k_positive_scored_docs(scores, k))
 }
 
 #[cfg(test)]
@@ -119,5 +137,26 @@ mod tests {
         let hits = retrieve_tfidf(&ix, &["a".into()], 10, TfIdfParams::linear()).unwrap();
         assert_eq!(hits[0].0, 1);
         assert_eq!(hits[1].0, 2);
+    }
+
+    #[test]
+    fn tfidf_duplicate_query_terms_preserve_scoring_weight() {
+        let mut ix = InvertedIndex::new();
+        ix.add_document(1, &["a".into()]);
+        ix.add_document(2, &["a".into(), "a".into()]);
+        // Ensure df(a) < N so IDF is non-zero under standard IDF.
+        ix.add_document(3, &["x".into()]);
+
+        let single = retrieve_tfidf(&ix, &["a".into()], 10, TfIdfParams::linear()).unwrap();
+        let duplicated =
+            retrieve_tfidf(&ix, &["a".into(), "a".into()], 10, TfIdfParams::linear()).unwrap();
+
+        assert_eq!(single.len(), duplicated.len());
+        for ((single_doc, single_score), (dup_doc, dup_score)) in
+            single.iter().zip(duplicated.iter())
+        {
+            assert_eq!(single_doc, dup_doc);
+            assert!((dup_score - single_score * 2.0).abs() < 1e-6);
+        }
     }
 }
