@@ -75,15 +75,19 @@ fn terms_from_text(text: &str) -> Vec<String> {
 
 #[cfg(feature = "cli")]
 fn index_corpus_lines<R: BufRead>(
-    reader: R,
+    mut reader: R,
 ) -> Result<(InvertedIndex, usize), Box<dyn std::error::Error>> {
     let mut idx = InvertedIndex::new();
     let mut doc_count = 0usize;
-    for line in reader.lines() {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
         if doc_count > u32::MAX as usize {
             return Err("too many documents: doc ids are u32".into());
         }
-        let line = line?;
         let terms = terms_from_text(&line);
         idx.add_document(doc_count as u32, &terms);
         doc_count += 1;
