@@ -126,12 +126,10 @@ fn delete_log(
     log: &str,
     durable: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !dir.exists(log) {
-        return Ok(());
-    }
-    dir.delete(log)?;
     if durable {
-        dir.durable_sync_parent_dir(log)?;
+        dir.delete_durable(log)?;
+    } else if dir.exists(log) {
+        dir.delete(log)?;
     }
     Ok(())
 }
