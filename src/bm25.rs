@@ -381,6 +381,10 @@ impl InvertedIndex {
         self.ensure_idf_computed();
         let query_idfs: Vec<f32> = query_terms.iter().map(|t| self.idf(t)).collect();
         let candidates = self.candidates(query_terms);
+        let avg_doc_len = self.postings.avg_doc_len();
+        if avg_doc_len == 0.0 {
+            return Ok(Vec::new());
+        }
 
         // Min-heap top-k.
         use std::cmp::Reverse;
@@ -404,7 +408,8 @@ impl InvertedIndex {
 
         let mut heap: BinaryHeap<Reverse<(FloatOrd, u32)>> = BinaryHeap::with_capacity(k + 1);
         for doc_id in candidates {
-            let score = score_optimized(self, doc_id, query_terms, &query_idfs, params);
+            let score =
+                score_optimized(self, doc_id, query_terms, &query_idfs, params, avg_doc_len);
             if !score.is_finite() || score <= 0.0 {
                 continue;
             }
@@ -435,11 +440,8 @@ fn score_optimized(
     query_terms: &[String],
     query_idfs: &[f32],
     params: Bm25Params,
+    avg_doc_len: f32,
 ) -> f32 {
-    let avg_doc_len = index.postings.avg_doc_len();
-    if avg_doc_len == 0.0 {
-        return 0.0;
-    }
     let doc_length = index.postings.document_len(doc_id) as f32;
     let mut score = 0.0;
     for (term, &idf) in query_terms.iter().zip(query_idfs.iter()) {
