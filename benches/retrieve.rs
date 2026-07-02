@@ -1,5 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use lexir::bm25::{Bm25Params, InvertedIndex};
+use lexir::query_likelihood::{retrieve_query_likelihood, QueryLikelihoodParams};
 use lexir::tfidf::{retrieve_tfidf, TfIdfParams};
 
 const N_DOCS: u32 = 20_000;
@@ -83,5 +84,35 @@ fn bench_tfidf_retrieve(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_bm25_retrieve, bench_tfidf_retrieve);
+fn bench_query_likelihood_retrieve(c: &mut Criterion) {
+    let index = build_index();
+    let params = QueryLikelihoodParams::default();
+    let mut group = c.benchmark_group("query_likelihood_retrieve");
+
+    for n in [2usize, 8] {
+        let query = query_terms(&index, n, 20);
+        group.bench_with_input(BenchmarkId::new("terms", n), &query, |b, query| {
+            b.iter(|| {
+                black_box(
+                    retrieve_query_likelihood(
+                        black_box(&index),
+                        black_box(query.as_slice()),
+                        10,
+                        params,
+                    )
+                    .unwrap(),
+                );
+            });
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_bm25_retrieve,
+    bench_tfidf_retrieve,
+    bench_query_likelihood_retrieve
+);
 criterion_main!(benches);

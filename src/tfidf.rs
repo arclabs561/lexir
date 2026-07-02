@@ -6,7 +6,8 @@
 //! References:
 //! - Spärck Jones (1972): term specificity / IDF motivation.
 
-use crate::bm25::{top_k_positive_scored_docs, InvertedIndex};
+use crate::bm25::InvertedIndex;
+use crate::ranking::top_k_positive_scored_docs;
 use crate::Error;
 use rankfns::{idf_transform, tf_transform, IdfVariant, TfVariant};
 use std::collections::HashMap;

@@ -7,9 +7,10 @@
 //! postings-backed corpus statistics as BM25/TF-IDF.
 
 use crate::bm25::InvertedIndex;
+use crate::ranking::top_k_finite_scored_docs;
 use crate::Error;
 use rankfns::{lm_smoothed_p, SmoothingMethod};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Query likelihood parameters.
 #[derive(Debug, Clone, Copy, Default)]
@@ -108,13 +109,12 @@ pub fn retrieve_query_likelihood(
 
     // Candidate docs: prefer postings-based candidates, but fall back to all docs
     // (smoothing can give non-zero mass even for non-matching docs).
-    let mut candidates: HashSet<u32> = index.candidates(query_terms).into_iter().collect();
+    let mut candidates = index.candidates(query_terms);
     if candidates.is_empty() {
         candidates = index.document_ids().collect();
     }
 
-    let mut results: Vec<(u32, f32)> = Vec::with_capacity(candidates.len());
-    for doc_id in candidates {
+    let results = candidates.into_iter().map(|doc_id| {
         let score = match params.smoothing {
             SmoothingMethod::JelinekMercer { lambda } => score_jelinek_mercer(
                 index,
@@ -133,18 +133,9 @@ pub fn retrieve_query_likelihood(
                 corpus_size,
             ),
         };
-
-        if score.is_finite() {
-            results.push((doc_id, score));
-        }
-    }
-
-    // Deterministic: score desc, then doc_id asc.
-    results.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    if results.len() > k {
-        results.truncate(k);
-    }
-    Ok(results)
+        (doc_id, score)
+    });
+    Ok(top_k_finite_scored_docs(results, k))
 }
 
 #[cfg(test)]

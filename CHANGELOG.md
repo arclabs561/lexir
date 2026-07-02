@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lookups. Current timings on the retrieval benchmark are
   `tfidf_retrieve/terms/2` at `[768.07 us 769.63 us 771.25 us]` and
   `tfidf_retrieve/terms/8` at `[2.4533 ms 2.4594 ms 2.4657 ms]`.
+- Sped up query-likelihood retrieval by keeping postings-planner candidates as a
+  vector and using bounded finite-score top-k ranking instead of hashing the
+  candidates and sorting the full scored set. Current timings on the retrieval
+  benchmark are `query_likelihood_retrieve/terms/2` at
+  `[3.0050 ms 3.0253 ms 3.0461 ms]` and
+  `query_likelihood_retrieve/terms/8` at `[12.443 ms 12.597 ms 12.754 ms]`.
 
 ## [0.1.5] - 2026-07-02
 

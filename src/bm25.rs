@@ -9,6 +9,7 @@
 //! - Robertson & Walker (1994). "Some simple effective approximations to the 2-Poisson model..."
 //! - Robertson & Zaragoza (2009). "The Probabilistic Relevance Framework: BM25 and Beyond."
 
+use crate::ranking::top_k_positive_scored_docs;
 use crate::Error;
 use postings::{CandidatePlan, PlannerConfig, PostingsIndex};
 use rankfns::{bm25_idf_plus1, bm25_tf};
@@ -411,49 +412,6 @@ fn bm25_tf_score(tf: f32, doc_length: f32, avg_doc_len: f32, params: Bm25Params)
             bm25_tf(tf, doc_length, avg_doc_len, params.k1, params.b) + delta
         }
     }
-}
-
-#[inline]
-fn cmp_doc_scores(a: &(u32, f32), b: &(u32, f32)) -> std::cmp::Ordering {
-    b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0))
-}
-
-pub(crate) fn top_k_positive_scored_docs<I>(docs: I, k: usize) -> Vec<(u32, f32)>
-where
-    I: IntoIterator<Item = (u32, f32)>,
-{
-    if k == 0 {
-        return Vec::new();
-    }
-
-    let mut ranked: Vec<(u32, f32)> = Vec::with_capacity(k);
-    let mut sorted = false;
-    for doc in docs {
-        if !doc.1.is_finite() || doc.1 <= 0.0 {
-            continue;
-        }
-        if ranked.len() < k {
-            ranked.push(doc);
-            continue;
-        }
-        if !sorted {
-            ranked.sort_by(cmp_doc_scores);
-            sorted = true;
-        }
-        if cmp_doc_scores(&doc, ranked.last().expect("top-k buffer is full")).is_lt() {
-            let last = ranked.len() - 1;
-            ranked[last] = doc;
-            let mut i = last;
-            while i > 0 && cmp_doc_scores(&ranked[i], &ranked[i - 1]).is_lt() {
-                ranked.swap(i, i - 1);
-                i -= 1;
-            }
-        }
-    }
-    if !sorted {
-        ranked.sort_by(cmp_doc_scores);
-    }
-    ranked
 }
 
 #[cfg(test)]

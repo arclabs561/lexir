@@ -29,6 +29,8 @@ pub mod tfidf;
 
 pub use error::Error;
 
+mod ranking;
+
 mod error {
     /// Errors for lexical retrieval.
     #[derive(thiserror::Error, Debug)]
