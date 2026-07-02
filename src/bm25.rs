@@ -281,30 +281,18 @@ impl InvertedIndex {
         }
     }
 
-    fn ensure_idf_computed(&self) {
-        let computed_at = *self.idf_computed_at_num_docs.borrow();
-        if computed_at == self.num_docs() {
-            let idf_map = self.precomputed_idf.borrow();
-            if !idf_map.is_empty() {
-                return;
-            }
-        }
-
-        let mut idf_map = self.precomputed_idf.borrow_mut();
-        idf_map.clear();
+    fn ensure_idf_cache_current(&self) {
         let n = self.num_docs();
-        for term in self.postings.terms() {
-            let df = self.postings.df(term);
-            if df > 0 {
-                let idf = bm25_idf_plus1(n, df);
-                idf_map.insert(term.to_string(), idf);
-            }
+        let mut computed_at = self.idf_computed_at_num_docs.borrow_mut();
+        if *computed_at != n {
+            self.precomputed_idf.borrow_mut().clear();
+            *computed_at = n;
         }
-        *self.idf_computed_at_num_docs.borrow_mut() = self.num_docs();
     }
 
     /// IDF with BM25 “+1” variant (positive idf, stable for frequent terms).
     pub fn idf(&self, term: &str) -> f32 {
+        self.ensure_idf_cache_current();
         {
             let idf_map = self.precomputed_idf.borrow();
             if let Some(&idf) = idf_map.get(term) {
@@ -313,7 +301,13 @@ impl InvertedIndex {
         }
         let df = self.postings.df(term);
         let n = self.num_docs();
-        bm25_idf_plus1(n, df)
+        let idf = bm25_idf_plus1(n, df);
+        if df > 0 {
+            self.precomputed_idf
+                .borrow_mut()
+                .insert(term.to_string(), idf);
+        }
+        idf
     }
 
     /// BM25 score for a document (caller provides tokenized query terms).
@@ -364,7 +358,6 @@ impl InvertedIndex {
             return Ok(Vec::new());
         }
 
-        self.ensure_idf_computed();
         let mut touched_upper_bound = 0usize;
         let query_idfs: Vec<f32> = query_terms
             .iter()
@@ -492,6 +485,43 @@ mod tests {
         let mut expected: Vec<u32> = (0..10u32).collect();
         expected.sort_unstable();
         assert_eq!(cands, expected);
+    }
+
+    #[test]
+    fn idf_cache_is_populated_lazily_by_query_terms() {
+        let mut ix = InvertedIndex::new();
+        ix.add_document(0, &["alpha".into(), "beta".into()]);
+        ix.add_document(1, &["beta".into(), "gamma".into()]);
+
+        assert!(
+            ix.precomputed_idf.borrow().is_empty(),
+            "writes leave the lazy IDF cache empty"
+        );
+
+        let _ = ix
+            .retrieve(&["alpha".into()], 10, Bm25Params::default())
+            .unwrap();
+        assert_eq!(
+            ix.precomputed_idf.borrow().len(),
+            1,
+            "first query caches only the queried term, not the full vocabulary"
+        );
+        assert!(ix.precomputed_idf.borrow().contains_key("alpha"));
+
+        let _ = ix
+            .retrieve(&["beta".into()], 10, Bm25Params::default())
+            .unwrap();
+        assert_eq!(
+            ix.precomputed_idf.borrow().len(),
+            2,
+            "later queries extend the cache per term"
+        );
+
+        ix.add_document(2, &["delta".into()]);
+        assert!(
+            ix.precomputed_idf.borrow().is_empty(),
+            "writes invalidate the query-term IDF cache"
+        );
     }
 
     fn build_test_index() -> InvertedIndex {

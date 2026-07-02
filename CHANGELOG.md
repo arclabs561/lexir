@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Bumped the optional `gramdex` dependency to 0.3.4.
 - Bumped the `postings` dependency to 0.1.8.
+- Changed BM25 IDF caching to populate lazily per queried term instead of
+  precomputing the whole vocabulary on the first retrieval.
 - Sped up short BM25 retrieval queries by reusing average document length across
   candidate scoring. In the retrieval benchmark, `bm25_retrieve/terms/2` moved
   from `[2.3789 ms 2.3959 ms 2.4100 ms]` to
