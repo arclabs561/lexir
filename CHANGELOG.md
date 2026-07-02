@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `query_likelihood_retrieve/duplicate_terms/8` moved from
   `[10.357 ms 10.427 ms 10.515 ms]` to
   `[2.8002 ms 2.8048 ms 2.8118 ms]`.
+- Reduced BM25's duplicate-query accumulation overhead by applying folded query
+  multiplicity with one multiply per posting. In the focused duplicate-query
+  benchmark, `bm25_retrieve/duplicate_terms/8` moved from
+  `[1.1405 ms 1.1437 ms 1.1456 ms]` to
+  `[1.1009 ms 1.1027 ms 1.1047 ms]`.
 - Sped up TF-IDF retrieval by accumulating scores directly from postings lists
   instead of materializing candidates and then doing per-document term-frequency
   lookups. Current timings on the retrieval benchmark are

@@ -117,9 +117,7 @@ pub fn retrieve_tfidf(
             let contribution = tf * idf;
             if contribution != 0.0 {
                 let score = scores.entry(doc_id).or_insert(0.0);
-                for _ in 0..count {
-                    *score += contribution;
-                }
+                *score += contribution * count as f32;
             }
         }
     }
