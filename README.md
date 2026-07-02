@@ -23,7 +23,7 @@ Add from `crates.io`:
 
 ```toml
 [dependencies]
-lexir = "0.1.4"
+lexir = "0.1.5"
 ```
 
 Notes:
