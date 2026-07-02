@@ -31,6 +31,7 @@ assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = "3.10"
 proptest = "1.5"
+criterion = "0.5"
 
 [features]
 default = ["persistence"]
@@ -43,3 +44,7 @@ cli = ["dep:clap", "recordlog"]
 name = "lexir"
 test = false
 path = "src/bin/lexir.rs"
+
+[[bench]]
+name = "retrieve"
+harness = false

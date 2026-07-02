@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added a Criterion benchmark for BM25 retrieval over a Zipf-shaped synthetic
+  corpus.
+
 ### Changed
 - Bumped the optional `gramdex` dependency to 0.3.4.
 - Bumped the `postings` dependency to 0.1.8.
