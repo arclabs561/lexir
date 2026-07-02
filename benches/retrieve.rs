@@ -43,6 +43,16 @@ fn query_terms(index: &InvertedIndex, count: usize, min_df: u32) -> Vec<String> 
         .collect()
 }
 
+fn duplicate_query_terms(index: &InvertedIndex, unique: usize, repeat: usize) -> Vec<String> {
+    let mut terms = Vec::with_capacity(unique * repeat);
+    for term in query_terms(index, unique, 20) {
+        for _ in 0..repeat {
+            terms.push(term.clone());
+        }
+    }
+    terms
+}
+
 fn bench_bm25_retrieve(c: &mut Criterion) {
     let index = build_index();
     let params = Bm25Params::default();
@@ -60,6 +70,21 @@ fn bench_bm25_retrieve(c: &mut Criterion) {
             });
         });
     }
+
+    let duplicate_query = duplicate_query_terms(&index, 2, 4);
+    group.bench_with_input(
+        BenchmarkId::new("duplicate_terms", duplicate_query.len()),
+        &duplicate_query,
+        |b, query| {
+            b.iter(|| {
+                black_box(
+                    index
+                        .retrieve(black_box(query.as_slice()), 10, params)
+                        .unwrap(),
+                );
+            });
+        },
+    );
 
     group.finish();
 }
@@ -80,6 +105,20 @@ fn bench_tfidf_retrieve(c: &mut Criterion) {
             });
         });
     }
+
+    let duplicate_query = duplicate_query_terms(&index, 2, 4);
+    group.bench_with_input(
+        BenchmarkId::new("duplicate_terms", duplicate_query.len()),
+        &duplicate_query,
+        |b, query| {
+            b.iter(|| {
+                black_box(
+                    retrieve_tfidf(black_box(&index), black_box(query.as_slice()), 10, params)
+                        .unwrap(),
+                );
+            });
+        },
+    );
 
     group.finish();
 }
@@ -105,6 +144,25 @@ fn bench_query_likelihood_retrieve(c: &mut Criterion) {
             });
         });
     }
+
+    let duplicate_query = duplicate_query_terms(&index, 2, 4);
+    group.bench_with_input(
+        BenchmarkId::new("duplicate_terms", duplicate_query.len()),
+        &duplicate_query,
+        |b, query| {
+            b.iter(|| {
+                black_box(
+                    retrieve_query_likelihood(
+                        black_box(&index),
+                        black_box(query.as_slice()),
+                        10,
+                        params,
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
 
     group.finish();
 }

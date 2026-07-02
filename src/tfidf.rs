@@ -7,6 +7,7 @@
 //! - Spärck Jones (1972): term specificity / IDF motivation.
 
 use crate::bm25::InvertedIndex;
+use crate::query_terms::term_multiplicities;
 use crate::ranking::top_k_positive_scored_docs;
 use crate::Error;
 use rankfns::{idf_transform, tf_transform, IdfVariant, TfVariant};
@@ -92,9 +93,10 @@ pub fn retrieve_tfidf(
 
     let num_docs = index.num_docs();
     let mut touched_upper_bound = 0usize;
-    let query_idfs: Vec<f32> = query_terms
+    let terms = term_multiplicities(query_terms);
+    let query_idfs: Vec<f32> = terms
         .iter()
-        .map(|term| {
+        .map(|&(term, _)| {
             let df = index.doc_frequency(term);
             let idf = idf_transform(num_docs, df, params.idf_variant);
             if idf != 0.0 {
@@ -105,7 +107,7 @@ pub fn retrieve_tfidf(
         .collect();
 
     let mut scores = HashMap::with_capacity(touched_upper_bound.min(num_docs as usize));
-    for (term, &idf) in query_terms.iter().zip(query_idfs.iter()) {
+    for (&(term, count), &idf) in terms.iter().zip(query_idfs.iter()) {
         if idf == 0.0 {
             continue;
         }
@@ -114,7 +116,10 @@ pub fn retrieve_tfidf(
             let tf = tf_transform(tf_count, params.tf_variant);
             let contribution = tf * idf;
             if contribution != 0.0 {
-                *scores.entry(doc_id).or_insert(0.0) += contribution;
+                let score = scores.entry(doc_id).or_insert(0.0);
+                for _ in 0..count {
+                    *score += contribution;
+                }
             }
         }
     }
@@ -158,6 +163,25 @@ mod tests {
         {
             assert_eq!(single_doc, dup_doc);
             assert!((dup_score - single_score * 2.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn tfidf_interleaved_duplicate_terms_match_point_scores() {
+        let mut ix = InvertedIndex::new();
+        ix.add_document(1, &["a".into(), "b".into()]);
+        ix.add_document(2, &["a".into(), "a".into(), "b".into()]);
+        ix.add_document(3, &["x".into()]);
+        let query = vec!["a".into(), "b".into(), "a".into()];
+
+        let hits = retrieve_tfidf(&ix, &query, 10, TfIdfParams::linear()).unwrap();
+
+        for (doc_id, score) in hits {
+            let expected = score_tfidf(&ix, doc_id, &query, TfIdfParams::linear());
+            assert!(
+                (score - expected).abs() < 1e-6,
+                "doc {doc_id}: retrieve={score}, point_score={expected}"
+            );
         }
     }
 }

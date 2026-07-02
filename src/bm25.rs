@@ -9,6 +9,7 @@
 //! - Robertson & Walker (1994). "Some simple effective approximations to the 2-Poisson model..."
 //! - Robertson & Zaragoza (2009). "The Probabilistic Relevance Framework: BM25 and Beyond."
 
+use crate::query_terms::term_multiplicities;
 use crate::ranking::top_k_positive_scored_docs;
 use crate::Error;
 use postings::{CandidatePlan, PlannerConfig, PostingsIndex};
@@ -359,10 +360,11 @@ impl InvertedIndex {
             return Ok(Vec::new());
         }
 
+        let terms = term_multiplicities(query_terms);
         let mut touched_upper_bound = 0usize;
-        let query_idfs: Vec<f32> = query_terms
+        let query_idfs: Vec<f32> = terms
             .iter()
-            .map(|term| {
+            .map(|&(term, _)| {
                 let idf = self.idf(term);
                 if idf != 0.0 {
                     touched_upper_bound =
@@ -377,7 +379,7 @@ impl InvertedIndex {
         }
 
         let mut scores = HashMap::with_capacity(touched_upper_bound.min(self.num_docs() as usize));
-        for (term, &idf) in query_terms.iter().zip(query_idfs.iter()) {
+        for (&(term, count), &idf) in terms.iter().zip(query_idfs.iter()) {
             if idf == 0.0 {
                 continue;
             }
@@ -387,7 +389,10 @@ impl InvertedIndex {
                 let tf_score = bm25_tf_score(tf as f32, doc_length, avg_doc_len, params);
                 let contribution = idf * tf_score;
                 if contribution != 0.0 {
-                    *scores.entry(doc_id).or_insert(0.0) += contribution;
+                    let score = scores.entry(doc_id).or_insert(0.0);
+                    for _ in 0..count {
+                        *score += contribution;
+                    }
                 }
             }
         }
@@ -480,6 +485,46 @@ mod tests {
             ix.precomputed_idf.borrow().is_empty(),
             "writes invalidate the query-term IDF cache"
         );
+    }
+
+    #[test]
+    fn retrieve_duplicate_query_terms_preserve_scoring_weight() {
+        let mut ix = InvertedIndex::new();
+        ix.add_document(1, &["a".into()]);
+        ix.add_document(2, &["a".into(), "a".into()]);
+
+        let single = ix
+            .retrieve(&["a".into()], 10, Bm25Params::default())
+            .unwrap();
+        let duplicated = ix
+            .retrieve(&["a".into(), "a".into()], 10, Bm25Params::default())
+            .unwrap();
+
+        assert_eq!(single.len(), duplicated.len());
+        for ((single_doc, single_score), (dup_doc, dup_score)) in
+            single.iter().zip(duplicated.iter())
+        {
+            assert_eq!(single_doc, dup_doc);
+            assert!((dup_score - single_score * 2.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn retrieve_interleaved_duplicate_terms_match_point_scores() {
+        let mut ix = InvertedIndex::new();
+        ix.add_document(1, &["a".into(), "b".into()]);
+        ix.add_document(2, &["a".into(), "a".into(), "b".into()]);
+        let query = vec!["a".into(), "b".into(), "a".into()];
+
+        let hits = ix.retrieve(&query, 10, Bm25Params::default()).unwrap();
+
+        for (doc_id, score) in hits {
+            let expected = ix.score(doc_id, &query, Bm25Params::default());
+            assert!(
+                (score - expected).abs() < 1e-6,
+                "doc {doc_id}: retrieve={score}, point_score={expected}"
+            );
+        }
     }
 
     fn build_test_index() -> InvertedIndex {

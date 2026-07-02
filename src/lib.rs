@@ -29,6 +29,7 @@ pub mod tfidf;
 
 pub use error::Error;
 
+mod query_terms;
 mod ranking;
 
 mod error {

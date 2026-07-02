@@ -7,6 +7,7 @@
 //! postings-backed corpus statistics as BM25/TF-IDF.
 
 use crate::bm25::InvertedIndex;
+use crate::query_terms::term_multiplicities;
 use crate::ranking::top_k_finite_scored_docs;
 use crate::Error;
 use rankfns::{lm_smoothed_p, SmoothingMethod};
@@ -34,15 +35,15 @@ fn corpus_probability(
 fn score_jelinek_mercer(
     index: &InvertedIndex,
     doc_id: u32,
-    query_terms: &[String],
+    query_terms: &[(&str, usize)],
     lambda: f32,
     corpus_term_freqs: &HashMap<String, u32>,
     corpus_size: u32,
 ) -> f32 {
     let mut log_score = 0.0;
+    let doc_len = index.document_length(doc_id) as f32;
 
-    for term in query_terms {
-        let doc_len = index.document_length(doc_id) as f32;
+    for &(term, count) in query_terms {
         let tf = index.term_frequency(doc_id, term) as f32;
         let p_corpus = corpus_probability(term, corpus_term_freqs, corpus_size);
         let p_smoothed = lm_smoothed_p(
@@ -52,7 +53,10 @@ fn score_jelinek_mercer(
             SmoothingMethod::JelinekMercer { lambda },
         );
         if p_smoothed > 0.0 {
-            log_score += p_smoothed.ln();
+            let log_p = p_smoothed.ln();
+            for _ in 0..count {
+                log_score += log_p;
+            }
         }
     }
 
@@ -62,7 +66,7 @@ fn score_jelinek_mercer(
 fn score_dirichlet(
     index: &InvertedIndex,
     doc_id: u32,
-    query_terms: &[String],
+    query_terms: &[(&str, usize)],
     mu: f32,
     corpus_term_freqs: &HashMap<String, u32>,
     corpus_size: u32,
@@ -70,7 +74,7 @@ fn score_dirichlet(
     let doc_length = index.document_length(doc_id) as f32;
     let mut log_score = 0.0;
 
-    for term in query_terms {
+    for &(term, count) in query_terms {
         let term_freq = index.term_frequency(doc_id, term) as f32;
         let p_corpus = corpus_probability(term, corpus_term_freqs, corpus_size);
         let p_smoothed = lm_smoothed_p(
@@ -80,7 +84,10 @@ fn score_dirichlet(
             SmoothingMethod::Dirichlet { mu },
         );
         if p_smoothed > 0.0 {
-            log_score += p_smoothed.ln();
+            let log_p = p_smoothed.ln();
+            for _ in 0..count {
+                log_score += log_p;
+            }
         }
     }
 
@@ -106,6 +113,7 @@ pub fn retrieve_query_likelihood(
 
     let (corpus_term_freqs, corpus_size) = index.corpus_stats_cached();
     let corpus_term_freqs = corpus_term_freqs.as_ref();
+    let terms = term_multiplicities(query_terms);
 
     // Candidate docs: prefer postings-based candidates, but fall back to all docs
     // (smoothing can give non-zero mass even for non-matching docs).
@@ -119,19 +127,14 @@ pub fn retrieve_query_likelihood(
             SmoothingMethod::JelinekMercer { lambda } => score_jelinek_mercer(
                 index,
                 doc_id,
-                query_terms,
+                &terms,
                 lambda,
                 corpus_term_freqs,
                 corpus_size,
             ),
-            SmoothingMethod::Dirichlet { mu } => score_dirichlet(
-                index,
-                doc_id,
-                query_terms,
-                mu,
-                corpus_term_freqs,
-                corpus_size,
-            ),
+            SmoothingMethod::Dirichlet { mu } => {
+                score_dirichlet(index, doc_id, &terms, mu, corpus_term_freqs, corpus_size)
+            }
         };
         (doc_id, score)
     });
@@ -161,5 +164,39 @@ mod tests {
         .unwrap();
         assert_eq!(hits[0].0, 1);
         assert_eq!(hits[1].0, 2);
+    }
+
+    #[test]
+    fn query_likelihood_duplicate_query_terms_preserve_scoring_weight() {
+        let mut ix = InvertedIndex::new();
+        ix.add_document(1, &["a".into()]);
+        ix.add_document(2, &["a".into(), "a".into()]);
+
+        let single = retrieve_query_likelihood(
+            &ix,
+            &["a".into()],
+            10,
+            QueryLikelihoodParams {
+                smoothing: SmoothingMethod::default(),
+            },
+        )
+        .unwrap();
+        let duplicated = retrieve_query_likelihood(
+            &ix,
+            &["a".into(), "a".into()],
+            10,
+            QueryLikelihoodParams {
+                smoothing: SmoothingMethod::default(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(single.len(), duplicated.len());
+        for ((single_doc, single_score), (dup_doc, dup_score)) in
+            single.iter().zip(duplicated.iter())
+        {
+            assert_eq!(single_doc, dup_doc);
+            assert!((dup_score - single_score * 2.0).abs() < 1e-6);
+        }
     }
 }
