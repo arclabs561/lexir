@@ -158,6 +158,59 @@ fn log_compact_preserves_deletes_and_search() {
 }
 
 #[test]
+fn log_compact_removes_log_when_all_docs_are_deleted() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+
+    lexir()
+        .args([
+            "log-add",
+            "--root",
+            root.to_str().unwrap(),
+            "--doc-id",
+            "1",
+            "--text",
+            "alpha stale",
+        ])
+        .assert()
+        .success();
+
+    lexir()
+        .args([
+            "log-delete",
+            "--root",
+            root.to_str().unwrap(),
+            "--doc-id",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    lexir()
+        .args(["log-compact", "--root", root.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "ok: compacted log (old_records=2 new_records=0)",
+        ));
+
+    assert!(!root.join("ops.log").exists());
+
+    lexir()
+        .args(["log-validate", "--root", root.to_str().unwrap()])
+        .assert()
+        .success();
+
+    lexir()
+        .args(["log-status", "--root", root.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("log: missing (records=0)").and(
+            predicate::str::contains("meta: present (applied_records=0, pending_records=0)"),
+        ));
+}
+
+#[test]
 fn torn_tail_best_effort_scan_succeeds_strict_fails() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();

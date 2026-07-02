@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - `query_pipeline` example and its `qexpr` / `qplan` dev-dependencies (both crates retired).
 
+### Fixed
+- Synced the parent directory after deleting an empty materialized log when
+  `--durable` is requested, matching the durability strength of log rewrites
+  that publish by atomic rename.
+
 ## [0.1.4] - 2026-06-11
 
 ### Changed

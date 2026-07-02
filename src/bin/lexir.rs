@@ -121,6 +121,22 @@ fn write_meta(
 }
 
 #[cfg(feature = "cli")]
+fn delete_log(
+    dir: &durability::FsDirectory,
+    log: &str,
+    durable: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !dir.exists(log) {
+        return Ok(());
+    }
+    dir.delete(log)?;
+    if durable {
+        dir.durable_sync_parent_dir(log)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cli")]
 fn require_meta_or_abort(
     dir: &durability::FsDirectory,
     checkpoint: &str,
@@ -244,9 +260,7 @@ fn rewrite_log(
     durable: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if ops.is_empty() {
-        if dir.exists(log) {
-            dir.delete(log)?;
-        }
+        delete_log(dir, log, durable)?;
         return Ok(());
     }
 
@@ -887,9 +901,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if reset_log {
                     // Reset log by deleting it; next writer will recreate with header.
-                    if dir.exists(&log) {
-                        dir.delete(&log)?;
-                    }
+                    delete_log(&dir, &log, durable)?;
                 }
 
                 let meta = if reset_log {
