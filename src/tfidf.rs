@@ -182,4 +182,75 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn tfidf_retrieve_matches_point_scores_on_random_corpus() {
+        // retrieve_tfidf streams scores inline from postings_iter rather than
+        // calling score_tfidf per doc; the two must not drift. Oracle: every
+        // doc with a positive point score, ranked score-desc then id-asc.
+        let mut state = 0x7f1d_f00d_u64;
+        let mut next_below = move |bound: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % bound
+        };
+        let vocab = ["a", "b", "c", "d", "e", "f"];
+        let mut ix = InvertedIndex::new();
+        let num_docs = 30u32;
+        for doc_id in 0..num_docs {
+            let len = 1 + next_below(12) as usize;
+            let tokens: Vec<String> = (0..len)
+                .map(|_| vocab[next_below(vocab.len() as u64) as usize].to_string())
+                .collect();
+            ix.add_document(doc_id, &tokens);
+        }
+
+        let queries: Vec<Vec<String>> = [
+            vec!["a"],
+            vec!["a", "b"],
+            vec!["a", "a", "c"],
+            vec!["f", "e", "d", "f"],
+            vec!["a", "zzz"],
+            vec!["zzz"],
+        ]
+        .into_iter()
+        .map(|q| q.into_iter().map(String::from).collect())
+        .collect();
+
+        for params in [
+            TfIdfParams::default(),
+            TfIdfParams::linear(),
+            TfIdfParams::smoothed(),
+        ] {
+            for query in &queries {
+                for k in [1usize, 5, num_docs as usize] {
+                    let got = retrieve_tfidf(&ix, query, k, params).unwrap();
+
+                    let mut want: Vec<(u32, f32)> = (0..num_docs)
+                        .map(|doc_id| (doc_id, score_tfidf(&ix, doc_id, query, params)))
+                        .filter(|&(_, s)| s > 0.0)
+                        .collect();
+                    want.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+                    want.truncate(k);
+
+                    assert_eq!(
+                        got.len(),
+                        want.len(),
+                        "count diverged for {query:?} k={k} {params:?}"
+                    );
+                    for ((gid, gscore), (wid, wscore)) in got.iter().zip(want.iter()) {
+                        assert_eq!(
+                            gid, wid,
+                            "doc order diverged for {query:?} k={k} {params:?}"
+                        );
+                        assert!(
+                            (gscore - wscore).abs() < 1e-5,
+                            "score diverged for doc {gid} {query:?} {params:?}: {gscore} vs {wscore}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
