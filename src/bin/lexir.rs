@@ -11,7 +11,7 @@ use lexir::bm25::{Bm25Params, InvertedIndex};
 #[cfg(feature = "cli")]
 use std::collections::BTreeMap;
 #[cfg(feature = "cli")]
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 #[cfg(feature = "cli")]
 use std::path::Path;
 #[cfg(feature = "cli")]
@@ -66,6 +66,35 @@ fn apply_ops(idx: &mut InvertedIndex, ops: &[LogOp]) {
             }
         }
     }
+}
+
+#[cfg(feature = "cli")]
+fn terms_from_text(text: &str) -> Vec<String> {
+    text.split_whitespace().map(str::to_string).collect()
+}
+
+#[cfg(feature = "cli")]
+fn index_corpus_lines<R: BufRead>(
+    reader: R,
+) -> Result<(InvertedIndex, usize), Box<dyn std::error::Error>> {
+    let mut idx = InvertedIndex::new();
+    let mut doc_count = 0usize;
+    for line in reader.lines() {
+        if doc_count > u32::MAX as usize {
+            return Err("too many documents: doc ids are u32".into());
+        }
+        let line = line?;
+        let terms = terms_from_text(&line);
+        idx.add_document(doc_count as u32, &terms);
+        doc_count += 1;
+    }
+    Ok((idx, doc_count))
+}
+
+#[cfg(feature = "cli")]
+fn index_corpus_file(path: &Path) -> Result<(InvertedIndex, usize), Box<dyn std::error::Error>> {
+    let file = std::fs::File::open(path)?;
+    index_corpus_lines(BufReader::new(file))
 }
 
 #[cfg(feature = "cli")]
@@ -699,13 +728,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 output,
                 durable,
             } => {
-                let text = std::fs::read_to_string(&input)?;
-                let mut idx = InvertedIndex::new();
-                for (i, line) in text.lines().enumerate() {
-                    let terms: Vec<String> =
-                        line.split_whitespace().map(|s| s.to_string()).collect();
-                    idx.add_document(i as u32, &terms);
-                }
+                let (idx, doc_count) = index_corpus_file(&input)?;
 
                 let parent = output.parent().unwrap_or_else(|| Path::new("."));
                 let file_name = output
@@ -721,7 +744,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     idx.save(&dir, file_name)?;
                 }
 
-                println!("Indexed {} documents to {:?}", text.lines().count(), output);
+                println!("Indexed {} documents to {:?}", doc_count, output);
             }
             Commands::SearchIndex { index, k, query } => {
                 let parent = index.parent().unwrap_or_else(|| Path::new("."));
@@ -742,13 +765,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Commands::Search { input, k, query } => {
-                let text = std::fs::read_to_string(&input)?;
-                let mut idx = InvertedIndex::new();
-                for (i, line) in text.lines().enumerate() {
-                    let terms: Vec<String> =
-                        line.split_whitespace().map(|s| s.to_string()).collect();
-                    idx.add_document(i as u32, &terms);
-                }
+                let (idx, _) = index_corpus_file(&input)?;
 
                 let results = idx.retrieve(&query, k, Bm25Params::default())?;
 
@@ -780,7 +797,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )?;
 
                 // Apply new op.
-                let terms: Vec<String> = text.split_whitespace().map(|s| s.to_string()).collect();
+                let terms = terms_from_text(&text);
                 idx.add_document(doc_id, &terms);
 
                 // Append to log.

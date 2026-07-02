@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Changed `lexir index` and `lexir search` to stream corpus files line by
+  line instead of reading the whole input file before indexing.
 - Sped up duplicate-heavy retrieval queries by folding query-term
   multiplicities before traversing postings. Duplicate query terms still carry
   the same scoring weight, but BM25, TF-IDF, and query-likelihood scan each

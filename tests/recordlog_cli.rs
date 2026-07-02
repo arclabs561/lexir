@@ -10,6 +10,51 @@ fn lexir() -> assert_cmd::Command {
 }
 
 #[test]
+fn index_command_saves_searchable_streamed_corpus() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let corpus = tmp.path().join("corpus.txt");
+    let index = tmp.path().join("index.bin");
+    fs::write(&corpus, "alpha one\nbeta two\nalpha two\n").expect("write corpus");
+
+    lexir()
+        .args([
+            "index",
+            "--input",
+            corpus.to_str().unwrap(),
+            "--output",
+            index.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Indexed 3 documents"));
+
+    lexir()
+        .args([
+            "search-index",
+            "--index",
+            index.to_str().unwrap(),
+            "--",
+            "alpha",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Doc 0").and(predicate::str::contains("Doc 2")));
+}
+
+#[test]
+fn search_command_indexes_corpus_path_directly() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let corpus = tmp.path().join("corpus.txt");
+    fs::write(&corpus, "alpha one\nbeta two\nalpha two\n").expect("write corpus");
+
+    lexir()
+        .args(["search", "--input", corpus.to_str().unwrap(), "--", "beta"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Doc 1"));
+}
+
+#[test]
 fn log_doctor_fix_repairs_missing_meta() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
