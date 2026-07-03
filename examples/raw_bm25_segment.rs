@@ -5,17 +5,17 @@
 
 use lexir::bm25::Bm25Params;
 use lexir::raw::retrieve_bm25_raw_file;
-use postings::raw::{write_u64_u32_segment_to, RawDocument, RawSegmentFile};
+use postings::raw::{write_u64_u32_segment_sorted_from_iter_to, RawDocument, RawSegmentFile};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let docs = vec![
+    let docs = [
         RawDocument::new(1, &[(10, 3), (20, 1)]),
         RawDocument::new(2, &[(10, 1), (30, 4)]),
         RawDocument::new(3, &[(20, 2), (30, 1)]),
     ];
     let path = std::env::temp_dir().join(format!("lexir-raw-{}.segment", std::process::id()));
     let mut file = std::fs::File::create(&path)?;
-    write_u64_u32_segment_to(&docs, &mut file)?;
+    write_u64_u32_segment_sorted_from_iter_to(docs, &mut file)?;
     drop(file);
 
     let mut segment = RawSegmentFile::open(&path)?;

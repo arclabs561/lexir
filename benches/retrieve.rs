@@ -3,7 +3,9 @@ use lexir::bm25::{Bm25Params, InvertedIndex};
 use lexir::query_likelihood::{retrieve_query_likelihood, QueryLikelihoodParams};
 use lexir::tfidf::{retrieve_tfidf, TfIdfParams};
 #[cfg(feature = "raw-segment")]
-use postings::raw::{write_u64_u32_segment_from_iter_to, RawDocument, RawSegmentFile, RawTermId};
+use postings::raw::{
+    write_u64_u32_segment_sorted_from_iter_to, RawDocument, RawSegmentFile, RawTermId,
+};
 
 const N_DOCS: u32 = 20_000;
 const VOCAB_SIZE: usize = 5_000;
@@ -92,7 +94,7 @@ fn write_raw_file(
         .map(|(doc_id, terms)| RawDocument::new(start_doc_id + doc_id as u32, terms));
     let path = dir.path().join(name);
     let mut file = std::fs::File::create(&path).unwrap();
-    write_u64_u32_segment_from_iter_to(docs, &mut file).unwrap();
+    write_u64_u32_segment_sorted_from_iter_to(docs, &mut file).unwrap();
     drop(file);
     RawSegmentFile::open(path).unwrap()
 }
@@ -201,7 +203,7 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
         .map(|(doc_id, terms)| RawDocument::new(doc_id as u32, terms));
     let file = tempfile::NamedTempFile::new().unwrap();
     let mut writer = std::fs::File::create(file.path()).unwrap();
-    write_u64_u32_segment_from_iter_to(docs, &mut writer).unwrap();
+    write_u64_u32_segment_sorted_from_iter_to(docs, &mut writer).unwrap();
     drop(writer);
     let mut segment = RawSegmentFile::open(file.path()).unwrap();
     let params = Bm25Params::default();
