@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scoring, avoiding useless posting reads for absent query terms.
 - Changed raw BM25 multi-file benchmarks to keep segment-reference construction
   outside timed loops.
+- Changed raw BM25 examples and benchmarks to write postings raw segments
+  directly to files through postings' caller-sink writer APIs.
 
 ## [0.2.1] - 2026-07-03
 
