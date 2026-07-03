@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Changed file-backed raw BM25 broad-query scoring to prefill dense
   document-length caches from raw segment metadata instead of doing repeated
   per-document metadata lookups.
+- Changed multi-file raw BM25 retrieval to skip finite zero-bound segments before
+  scoring, avoiding useless posting reads for absent query terms.
 
 ## [0.2.1] - 2026-07-03
 

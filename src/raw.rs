@@ -392,6 +392,7 @@ pub fn retrieve_bm25_raw_files_with_stats(
         }
         order.push((index, upper_bound));
     }
+    order.retain(|(_, upper_bound)| *upper_bound > 0.0 || !upper_bound.is_finite());
     order.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
 
     let mut threshold = 0.0;
@@ -1154,6 +1155,31 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, RawScoringError::MissingCorpusStats(8)));
+    }
+
+    #[test]
+    fn raw_bm25_files_return_empty_for_absent_terms_without_stats() {
+        let first = vec![(10, vec![(7, 5)])];
+        let second = vec![(1, vec![(8, 5)])];
+        let dir = tempfile::tempdir().unwrap();
+        let first_path = dir.path().join("first.raw");
+        let second_path = dir.path().join("second.raw");
+        std::fs::write(&first_path, build_raw_bytes_with_doc_ids(&first)).unwrap();
+        std::fs::write(&second_path, build_raw_bytes_with_doc_ids(&second)).unwrap();
+        let mut first_segment = RawSegmentFile::open(&first_path).unwrap();
+        let mut second_segment = RawSegmentFile::open(&second_path).unwrap();
+        let mut segments = [&mut first_segment, &mut second_segment];
+
+        let hits = retrieve_bm25_raw_files_with_stats(
+            &mut segments,
+            &[99],
+            10,
+            Bm25Params::default(),
+            &RawBm25CorpusStats::new(2, 1.0, []),
+        )
+        .unwrap();
+
+        assert!(hits.is_empty());
     }
 
     #[test]
