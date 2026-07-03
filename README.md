@@ -92,7 +92,9 @@ local document frequencies. For an immutable segment set, use
 `retrieve_bm25_raw_files_with_stats`, so every segment uses the same IDF and
 average document length. The multi-file path orders segments by a conservative
 BM25 upper bound and can skip segments that cannot enter the current top-k.
-Segment document ids must already be globally unique.
+Use `retrieve_bm25_raw_files_with_search_stats` when you need searched/pruned
+segment counts for profiling. Segment document ids must already be globally
+unique.
 
 The caller owns the lexicon, commit lifecycle, deletes, and segment merge
 policy.

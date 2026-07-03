@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variants, sparse document ids, and multi-file global statistics.
 - Added a raw BM25 pruning regression that checks a dominated segment is
   skipped while preserving the in-memory ranking.
+- Added `retrieve_bm25_raw_files_with_search_stats` for raw BM25 segment-pruning
+  diagnostics.
 
 ### Changed
 - Changed file-backed raw BM25 broad-query scoring to prefill dense
@@ -19,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-document metadata lookups.
 - Changed multi-file raw BM25 retrieval to skip finite zero-bound segments before
   scoring, avoiding useless posting reads for absent query terms.
+- Changed raw BM25 multi-file benchmarks to keep segment-reference construction
+  outside timed loops.
 
 ## [0.2.1] - 2026-07-03
 

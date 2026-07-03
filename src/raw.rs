@@ -65,6 +65,26 @@ pub struct RawBm25CorpusStats {
     dfs: HashMap<RawTermId, u32>,
 }
 
+/// Segment-level diagnostics for a multi-file raw BM25 search.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RawBm25SearchStats {
+    /// Raw segment files supplied to the search.
+    pub segments_seen: usize,
+    /// Raw segment files actually scored.
+    pub segments_scored: usize,
+    /// Raw segment files skipped by a zero bound or current top-k threshold.
+    pub segments_pruned: usize,
+}
+
+/// Hits and segment-level diagnostics from a multi-file raw BM25 search.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RawBm25SearchResult {
+    /// Top-k hits sorted by descending BM25 score, then document id.
+    pub hits: Vec<(DocId, f32)>,
+    /// Segment-pruning diagnostics for the search.
+    pub stats: RawBm25SearchStats,
+}
+
 impl RawBm25CorpusStats {
     /// Create corpus stats from a document count, average document length, and
     /// document frequencies for terms that may be scored.
@@ -352,19 +372,46 @@ pub fn retrieve_bm25_raw_files_with_stats(
     params: Bm25Params,
     stats: &RawBm25CorpusStats,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    retrieve_bm25_raw_files_with_search_stats(segments, query_terms, k, params, stats)
+        .map(|result| result.hits)
+}
+
+/// Retrieve top-k documents across file-backed raw segments and return
+/// segment-pruning diagnostics for the search.
+///
+/// Segment document ids must already be globally unique. Passing shared corpus
+/// stats keeps BM25 IDF and length normalization consistent across all
+/// immutable segments.
+pub fn retrieve_bm25_raw_files_with_search_stats(
+    segments: &mut [&mut RawSegmentFile],
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<RawBm25SearchResult, RawScoringError<RawSegmentFileError>> {
     if query_terms.is_empty() {
         return Err(RawScoringError::EmptyQuery);
     }
     if stats.num_docs() == 0 {
         return Err(RawScoringError::EmptyIndex);
     }
+    let mut search_stats = RawBm25SearchStats {
+        segments_seen: segments.len(),
+        ..RawBm25SearchStats::default()
+    };
     if k == 0 {
-        return Ok(Vec::new());
+        return Ok(RawBm25SearchResult {
+            hits: Vec::new(),
+            stats: search_stats,
+        });
     }
 
     let avg_doc_len = stats.avg_doc_len();
     if avg_doc_len <= 0.0 || !avg_doc_len.is_finite() {
-        return Ok(Vec::new());
+        return Ok(RawBm25SearchResult {
+            hits: Vec::new(),
+            stats: search_stats,
+        });
     }
 
     let terms = raw_term_multiplicities(query_terms);
@@ -390,16 +437,21 @@ pub fn retrieve_bm25_raw_files_with_stats(
             upper_bound +=
                 idf * term.count as f32 * bm25_tf_upper_bound(max_tf as f32, avg_doc_len, params);
         }
-        order.push((index, upper_bound));
+        if upper_bound > 0.0 || !upper_bound.is_finite() {
+            order.push((index, upper_bound));
+        } else {
+            search_stats.segments_pruned += 1;
+        }
     }
-    order.retain(|(_, upper_bound)| *upper_bound > 0.0 || !upper_bound.is_finite());
     order.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
 
     let mut threshold = 0.0;
     for (index, upper_bound) in order {
         if candidates.len() >= k && upper_bound < threshold {
+            search_stats.segments_pruned += 1;
             continue;
         }
+        search_stats.segments_scored += 1;
         candidates.extend(retrieve_bm25_raw_file_with_stats(
             segments[index],
             query_terms,
@@ -413,7 +465,10 @@ pub fn retrieve_bm25_raw_files_with_stats(
         }
     }
 
-    Ok(top_k_positive_scored_docs(candidates, k))
+    Ok(RawBm25SearchResult {
+        hits: top_k_positive_scored_docs(candidates, k),
+        stats: search_stats,
+    })
 }
 
 fn retrieve_bm25_raw_with_stats<S>(
@@ -1096,15 +1151,16 @@ mod tests {
         let params = Bm25Params::default();
         let stats = RawBm25CorpusStats::from_raw_files(&mut segments, &query).unwrap();
 
-        let raw_hits =
-            retrieve_bm25_raw_files_with_stats(&mut segments, &query, 1, params, &stats).unwrap();
+        let raw_result =
+            retrieve_bm25_raw_files_with_search_stats(&mut segments, &query, 1, params, &stats)
+                .unwrap();
 
         // (a) The pruned result equals the brute-force in-memory oracle.
         let memory_query: Vec<String> = query.iter().map(ToString::to_string).collect();
         let memory_hits = index.retrieve(&memory_query, 1, params).unwrap();
-        assert_eq!(raw_hits.len(), memory_hits.len());
+        assert_eq!(raw_result.hits.len(), memory_hits.len());
         for ((raw_doc, raw_score), (memory_doc, memory_score)) in
-            raw_hits.iter().zip(memory_hits.iter())
+            raw_result.hits.iter().zip(memory_hits.iter())
         {
             assert_eq!(raw_doc, memory_doc);
             assert!(
@@ -1112,7 +1168,15 @@ mod tests {
                 "doc {raw_doc}: raw={raw_score}, memory={memory_score}"
             );
         }
-        assert_eq!(raw_hits.first().map(|(doc, _)| *doc), Some(100));
+        assert_eq!(raw_result.hits.first().map(|(doc, _)| *doc), Some(100));
+        assert_eq!(
+            raw_result.stats,
+            RawBm25SearchStats {
+                segments_seen: 2,
+                segments_scored: 1,
+                segments_pruned: 1,
+            }
+        );
 
         // (b) The skip actually fired: recompute segment B's upper bound with
         // the same arithmetic as the pruning path and assert it is below the
@@ -1124,7 +1188,7 @@ mod tests {
         let idf = bm25_idf_plus1(stats.num_docs(), corpus_df);
         let b_max_tf = segments[1].max_weight(TERM).unwrap();
         let b_upper_bound = idf * bm25_tf_upper_bound(b_max_tf as f32, avg_doc_len, params);
-        let realized_top = raw_hits[0].1;
+        let realized_top = raw_result.hits[0].1;
         assert!(
             b_upper_bound < realized_top,
             "segment B upper bound {b_upper_bound} must be below the realized top \

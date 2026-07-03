@@ -264,8 +264,8 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
         BenchmarkId::new("files_terms", multi_query.len()),
         &multi_query,
         |b, query| {
+            let mut segments: Vec<_> = multi_segments.iter_mut().collect();
             b.iter(|| {
-                let mut segments: Vec<_> = multi_segments.iter_mut().collect();
                 black_box(
                     lexir::raw::retrieve_bm25_raw_files(
                         black_box(segments.as_mut_slice()),
@@ -282,8 +282,8 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
     let (_prunable_dir, mut prunable_segments, prunable_stats, prunable_query) =
         build_prunable_raw_files();
     group.bench_function("files_prunable_with_stats", |b| {
+        let mut segments: Vec<_> = prunable_segments.iter_mut().collect();
         b.iter(|| {
-            let mut segments: Vec<_> = prunable_segments.iter_mut().collect();
             black_box(
                 lexir::raw::retrieve_bm25_raw_files_with_stats(
                     black_box(segments.as_mut_slice()),
@@ -299,8 +299,8 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
 
     let (_exact_dir, mut exact_segments, exact_stats, exact_query) = build_prunable_raw_files();
     group.bench_function("files_forced_all_segments_with_stats", |b| {
+        let mut segments: Vec<_> = exact_segments.iter_mut().collect();
         b.iter(|| {
-            let mut segments: Vec<_> = exact_segments.iter_mut().collect();
             black_box(retrieve_bm25_raw_files_without_segment_pruning(
                 black_box(segments.as_mut_slice()),
                 black_box(exact_query.as_slice()),
