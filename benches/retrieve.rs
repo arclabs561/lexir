@@ -285,6 +285,19 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
             )
         })
         .collect();
+    let chunk_len_64 = raw_docs.len().div_ceil(64);
+    let mut multi_segments_64: Vec<_> = raw_docs
+        .chunks(chunk_len_64)
+        .enumerate()
+        .map(|(chunk_id, chunk)| {
+            write_raw_file(
+                &dir,
+                &format!("chunk-64-{chunk_id}.raw"),
+                chunk,
+                (chunk_id * chunk_len_64) as u32,
+            )
+        })
+        .collect();
     let multi_query = raw_query_terms(&segment, 8, 20);
     group.bench_with_input(
         BenchmarkId::new("files_terms", multi_query.len()),
@@ -338,6 +351,10 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
     let all_term_stats =
         lexir::raw::RawBm25CorpusStats::from_raw_files_all_terms(&mut all_stats_refs).unwrap();
     drop(all_stats_refs);
+    let mut all_stats_refs_64: Vec<_> = multi_segments_64.iter_mut().collect();
+    let all_term_stats_64 =
+        lexir::raw::RawBm25CorpusStats::from_raw_files_all_terms(&mut all_stats_refs_64).unwrap();
+    drop(all_stats_refs_64);
     group.bench_with_input(
         BenchmarkId::new("files_terms_all_stats", multi_query.len()),
         &multi_query,
@@ -351,6 +368,25 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
                         10,
                         params,
                         black_box(&all_term_stats),
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new("files_terms_all_stats_64", multi_query.len()),
+        &multi_query,
+        |b, query| {
+            let mut segments: Vec<_> = multi_segments_64.iter_mut().collect();
+            b.iter(|| {
+                black_box(
+                    lexir::raw::retrieve_bm25_raw_files_with_stats(
+                        black_box(segments.as_mut_slice()),
+                        black_box(query.as_slice()),
+                        10,
+                        params,
+                        black_box(&all_term_stats_64),
                     )
                     .unwrap(),
                 );

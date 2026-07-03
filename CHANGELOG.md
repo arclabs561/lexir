@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   over immutable raw segment sets without reading postings payloads.
 - Added raw BM25 benchmarks for all-term stats construction and repeated
   multi-file searches with precomputed all-term stats.
+- Added a raw BM25 benchmark for many small segment files with precomputed
+  corpus stats.
+
+### Changed
+
+- Changed raw BM25 dense score and document-length buffers to use the segment's
+  document-id span instead of allocating from zero to the maximum document id.
 
 ## [0.2.3] - 2026-07-03
 
