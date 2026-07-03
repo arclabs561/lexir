@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added raw BM25 parity sweeps across query lengths, retrieval depths, BM25
+  variants, sparse document ids, and multi-file global statistics.
+- Added a raw BM25 pruning regression that checks a dominated segment is
+  skipped while preserving the in-memory ranking.
+
 ## [0.2.1] - 2026-07-03
 
 ### Added

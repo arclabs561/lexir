@@ -160,7 +160,7 @@ fn bench_bm25_retrieve(c: &mut Criterion) {
     let params = Bm25Params::default();
     let mut group = c.benchmark_group("bm25_retrieve");
 
-    for n in [2usize, 8] {
+    for n in [2usize, 8, 32] {
         let query = query_terms(&index, n, 20);
         group.bench_with_input(BenchmarkId::new("terms", n), &query, |b, query| {
             b.iter(|| {
@@ -206,7 +206,7 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
     let params = Bm25Params::default();
     let mut group = c.benchmark_group("raw_bm25_retrieve");
 
-    for n in [2usize, 8] {
+    for n in [2usize, 8, 32] {
         let query = raw_query_terms(&segment, n, 20);
         group.bench_with_input(BenchmarkId::new("file_terms", n), &query, |b, query| {
             b.iter(|| {
