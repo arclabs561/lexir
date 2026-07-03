@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-03
+
 ### Added
 - Added the `raw-segment` feature with `retrieve_bm25_raw_segment` and
   `retrieve_bm25_raw_file`, scoring BM25 directly over postings' immutable raw
