@@ -19,6 +19,9 @@ pub enum RawScoringError<E> {
     EmptyQuery,
     /// Segment contains no documents.
     EmptyIndex,
+    /// A scored term appears in a segment but has no corpus document-frequency
+    /// entry in the provided stats.
+    MissingCorpusStats(RawTermId),
     /// The underlying raw segment reader failed.
     Source(E),
 }
@@ -28,6 +31,9 @@ impl<E: fmt::Display> fmt::Display for RawScoringError<E> {
         match self {
             Self::EmptyQuery => f.write_str("empty query"),
             Self::EmptyIndex => f.write_str("empty index"),
+            Self::MissingCorpusStats(term_id) => {
+                write!(f, "missing corpus stats for raw term {term_id}")
+            }
             Self::Source(source) => source.fmt(f),
         }
     }
@@ -40,8 +46,130 @@ where
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Source(source) => Some(source),
-            Self::EmptyQuery | Self::EmptyIndex => None,
+            Self::EmptyQuery | Self::EmptyIndex | Self::MissingCorpusStats(_) => None,
         }
+    }
+}
+
+/// Query-scoped corpus statistics for raw-segment BM25 scoring.
+///
+/// BM25 IDF and length normalization are corpus-level quantities. For a single
+/// raw segment, `retrieve_bm25_raw_file` derives these from that segment. For a
+/// segment set, build stats from all searched segments and pass them to the
+/// `*_with_stats` functions so every segment uses the same IDF and average
+/// document length.
+#[derive(Debug, Clone)]
+pub struct RawBm25CorpusStats {
+    num_docs: u32,
+    avg_doc_len: f32,
+    dfs: HashMap<RawTermId, u32>,
+}
+
+impl RawBm25CorpusStats {
+    /// Create corpus stats from a document count, average document length, and
+    /// document frequencies for terms that may be scored.
+    ///
+    /// A term that has postings in a searched segment must be present in `dfs`.
+    /// Terms absent from all searched segments do not need entries.
+    pub fn new<I>(num_docs: u32, avg_doc_len: f32, dfs: I) -> Self
+    where
+        I: IntoIterator<Item = (RawTermId, u32)>,
+    {
+        Self {
+            num_docs,
+            avg_doc_len,
+            dfs: dfs.into_iter().collect(),
+        }
+    }
+
+    /// Build query-scoped corpus stats from file-backed raw segments.
+    ///
+    /// This reads fixed segment directories for the unique query terms, not full
+    /// postings payloads. Use this when querying several immutable raw files as
+    /// one corpus.
+    pub fn from_raw_files(
+        segments: &mut [&mut RawSegmentFile],
+        query_terms: &[RawTermId],
+    ) -> Result<Self, RawScoringError<RawSegmentFileError>> {
+        if query_terms.is_empty() {
+            return Err(RawScoringError::EmptyQuery);
+        }
+
+        let terms = raw_term_multiplicities(query_terms);
+        let mut num_docs = 0u32;
+        let mut total_doc_len = 0.0f64;
+        let mut dfs = HashMap::with_capacity(terms.len());
+        for term in &terms {
+            dfs.insert(term.term_id, 0u32);
+        }
+
+        for segment in segments.iter_mut() {
+            let segment_docs = segment.num_docs();
+            num_docs = num_docs.saturating_add(segment_docs);
+            total_doc_len += segment.avg_doc_len() as f64 * segment_docs as f64;
+
+            for term in &terms {
+                let df = segment.df(term.term_id).map_err(RawScoringError::Source)?;
+                if let Some(total_df) = dfs.get_mut(&term.term_id) {
+                    *total_df = total_df.saturating_add(df);
+                }
+            }
+        }
+
+        if num_docs == 0 {
+            return Err(RawScoringError::EmptyIndex);
+        }
+
+        Ok(Self {
+            num_docs,
+            avg_doc_len: (total_doc_len / num_docs as f64) as f32,
+            dfs,
+        })
+    }
+
+    fn from_reader<S>(
+        segment: &mut S,
+        query_terms: &[RawTermId],
+    ) -> Result<Self, RawScoringError<S::Error>>
+    where
+        S: RawSegmentRead,
+    {
+        if query_terms.is_empty() {
+            return Err(RawScoringError::EmptyQuery);
+        }
+
+        let num_docs = segment.num_docs();
+        if num_docs == 0 {
+            return Err(RawScoringError::EmptyIndex);
+        }
+
+        let terms = raw_term_multiplicities(query_terms);
+        let mut dfs = HashMap::with_capacity(terms.len());
+        for term in terms {
+            let df = segment.df(term.term_id).map_err(RawScoringError::Source)?;
+            dfs.insert(term.term_id, df);
+        }
+
+        Ok(Self {
+            num_docs,
+            avg_doc_len: segment.avg_doc_len(),
+            dfs,
+        })
+    }
+
+    /// Number of documents in the corpus represented by these stats.
+    pub fn num_docs(&self) -> u32 {
+        self.num_docs
+    }
+
+    /// Average document length used for BM25 length normalization.
+    pub fn avg_doc_len(&self) -> f32 {
+        self.avg_doc_len
+    }
+
+    /// Document frequency for a raw term, if present in this stats object.
+    pub fn df(&self, term_id: RawTermId) -> Option<u32> {
+        self.dfs.get(&term_id).copied()
     }
 }
 
@@ -123,7 +251,21 @@ pub fn retrieve_bm25_raw_segment(
     params: Bm25Params,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<postings::raw::Error>> {
     let mut segment = *segment;
-    retrieve_bm25_raw(&mut segment, query_terms, k, params)
+    let stats = RawBm25CorpusStats::from_reader(&mut segment, query_terms)?;
+    retrieve_bm25_raw_with_stats(&mut segment, query_terms, k, params, &stats)
+}
+
+/// Retrieve top-k documents using BM25 over a byte-backed raw segment with
+/// caller-provided corpus stats.
+pub fn retrieve_bm25_raw_segment_with_stats(
+    segment: &RawSegment<'_>,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<postings::raw::Error>> {
+    let mut segment = *segment;
+    retrieve_bm25_raw_with_stats(&mut segment, query_terms, k, params, stats)
 }
 
 /// Retrieve top-k documents using BM25 over a file-backed raw segment.
@@ -136,14 +278,80 @@ pub fn retrieve_bm25_raw_file(
     k: usize,
     params: Bm25Params,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
-    retrieve_bm25_raw(segment, query_terms, k, params)
+    let stats = RawBm25CorpusStats::from_reader(segment, query_terms)?;
+    retrieve_bm25_raw_with_stats(segment, query_terms, k, params, &stats)
 }
 
-fn retrieve_bm25_raw<S>(
+/// Retrieve top-k documents using BM25 over a file-backed raw segment with
+/// caller-provided corpus stats.
+pub fn retrieve_bm25_raw_file_with_stats(
+    segment: &mut RawSegmentFile,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    retrieve_bm25_raw_with_stats(segment, query_terms, k, params, stats)
+}
+
+/// Retrieve top-k documents across file-backed raw segments as one corpus.
+///
+/// Segment document ids must already be globally unique. The helper builds
+/// query-scoped corpus stats from all segments, scores each segment with those
+/// stats, and merges the per-segment top-k lists.
+pub fn retrieve_bm25_raw_files(
+    segments: &mut [&mut RawSegmentFile],
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    let stats = RawBm25CorpusStats::from_raw_files(segments, query_terms)?;
+    retrieve_bm25_raw_files_with_stats(segments, query_terms, k, params, &stats)
+}
+
+/// Retrieve top-k documents across file-backed raw segments using
+/// caller-provided corpus stats.
+///
+/// Segment document ids must already be globally unique. Passing shared corpus
+/// stats keeps BM25 IDF and length normalization consistent across all
+/// immutable segments.
+pub fn retrieve_bm25_raw_files_with_stats(
+    segments: &mut [&mut RawSegmentFile],
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    if query_terms.is_empty() {
+        return Err(RawScoringError::EmptyQuery);
+    }
+    if stats.num_docs() == 0 {
+        return Err(RawScoringError::EmptyIndex);
+    }
+    if k == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut candidates = Vec::with_capacity(k.saturating_mul(segments.len()));
+    for segment in segments.iter_mut() {
+        candidates.extend(retrieve_bm25_raw_file_with_stats(
+            segment,
+            query_terms,
+            k,
+            params,
+            stats,
+        )?);
+    }
+
+    Ok(top_k_positive_scored_docs(candidates, k))
+}
+
+fn retrieve_bm25_raw_with_stats<S>(
     segment: &mut S,
     query_terms: &[RawTermId],
     k: usize,
     params: Bm25Params,
+    stats: &RawBm25CorpusStats,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<S::Error>>
 where
     S: RawSegmentRead,
@@ -151,15 +359,14 @@ where
     if query_terms.is_empty() {
         return Err(RawScoringError::EmptyQuery);
     }
-    let num_docs = segment.num_docs();
-    if num_docs == 0 {
+    if stats.num_docs() == 0 {
         return Err(RawScoringError::EmptyIndex);
     }
     if k == 0 {
         return Ok(Vec::new());
     }
-    let avg_doc_len = segment.avg_doc_len();
-    if avg_doc_len == 0.0 {
+    let avg_doc_len = stats.avg_doc_len();
+    if avg_doc_len <= 0.0 || !avg_doc_len.is_finite() {
         return Ok(Vec::new());
     }
 
@@ -167,18 +374,25 @@ where
     let mut touched_upper_bound = 0usize;
     for term in &mut terms {
         let df = segment.df(term.term_id).map_err(RawScoringError::Source)?;
-        term.idf = bm25_idf_plus1(num_docs, df);
+        if df == 0 {
+            continue;
+        }
+        let corpus_df = stats
+            .df(term.term_id)
+            .ok_or(RawScoringError::MissingCorpusStats(term.term_id))?;
+        term.idf = bm25_idf_plus1(stats.num_docs(), corpus_df);
         if term.idf != 0.0 {
             touched_upper_bound = touched_upper_bound.saturating_add(df as usize);
         }
     }
 
     if let Some(slots) = dense_bm25_slots(segment.max_doc_id(), touched_upper_bound) {
-        return retrieve_bm25_raw_dense(segment, terms, slots, k, params);
+        return retrieve_bm25_raw_dense(segment, terms, slots, k, params, avg_doc_len);
     }
 
-    let mut scores = HashMap::with_capacity(touched_upper_bound.min(num_docs as usize));
-    let mut doc_lengths = HashMap::with_capacity(touched_upper_bound.min(num_docs as usize));
+    let capacity = touched_upper_bound.min(stats.num_docs() as usize);
+    let mut scores = HashMap::with_capacity(capacity);
+    let mut doc_lengths = HashMap::with_capacity(capacity);
     for term in terms {
         if term.idf == 0.0 {
             continue;
@@ -220,11 +434,11 @@ fn retrieve_bm25_raw_dense<S>(
     slots: usize,
     k: usize,
     params: Bm25Params,
+    avg_doc_len: f32,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<S::Error>>
 where
     S: RawSegmentRead,
 {
-    let avg_doc_len = segment.avg_doc_len();
     let mut scores = vec![0.0; slots];
     let mut doc_lengths = vec![0u32; slots];
     let mut seen = vec![false; slots];
@@ -325,15 +539,23 @@ mod tests {
     fn build_memory_index(raw_docs: &[Vec<(RawTermId, u32)>]) -> InvertedIndex {
         let mut index = InvertedIndex::new();
         for (doc_id, terms) in raw_docs.iter().enumerate() {
-            let mut expanded = Vec::new();
-            for &(term_id, weight) in terms {
-                for _ in 0..weight {
-                    expanded.push(term_id.to_string());
-                }
-            }
-            index.add_document(doc_id as DocId, &expanded);
+            add_raw_doc_to_memory_index(&mut index, doc_id as DocId, terms);
         }
         index
+    }
+
+    fn add_raw_doc_to_memory_index(
+        index: &mut InvertedIndex,
+        doc_id: DocId,
+        terms: &[(RawTermId, u32)],
+    ) {
+        let mut expanded = Vec::new();
+        for &(term_id, weight) in terms {
+            for _ in 0..weight {
+                expanded.push(term_id.to_string());
+            }
+        }
+        index.add_document(doc_id, &expanded);
     }
 
     fn build_raw_bytes(raw_docs: &[Vec<(RawTermId, u32)>]) -> Vec<u8> {
@@ -341,6 +563,14 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(doc_id, terms)| RawDocument::new(doc_id as DocId, terms))
+            .collect();
+        write_u64_u32_segment(&docs).unwrap()
+    }
+
+    fn build_raw_bytes_with_doc_ids(raw_docs: &[(DocId, Vec<(RawTermId, u32)>)]) -> Vec<u8> {
+        let docs: Vec<_> = raw_docs
+            .iter()
+            .map(|(doc_id, terms)| RawDocument::new(*doc_id, terms))
             .collect();
         write_u64_u32_segment(&docs).unwrap()
     }
@@ -389,6 +619,89 @@ mod tests {
             retrieve_bm25_raw_file(&mut file_segment, &query, 3, Bm25Params::default()).unwrap();
 
         assert_eq!(file_hits, byte_hits);
+    }
+
+    #[test]
+    fn raw_bm25_files_match_in_memory_index_with_global_stats() {
+        let first = vec![
+            (1, vec![(10, 3), (20, 1)]),
+            (2, vec![(20, 5)]),
+            (3, vec![(30, 1)]),
+        ];
+        let second = vec![
+            (10, vec![(10, 1), (30, 3)]),
+            (11, vec![(30, 2)]),
+            (12, vec![(40, 4)]),
+        ];
+        let mut index = InvertedIndex::new();
+        for (doc_id, terms) in first.iter().chain(second.iter()) {
+            add_raw_doc_to_memory_index(&mut index, *doc_id, terms);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let first_path = dir.path().join("first.raw");
+        let second_path = dir.path().join("second.raw");
+        std::fs::write(&first_path, build_raw_bytes_with_doc_ids(&first)).unwrap();
+        std::fs::write(&second_path, build_raw_bytes_with_doc_ids(&second)).unwrap();
+        let mut first_segment = RawSegmentFile::open(&first_path).unwrap();
+        let mut second_segment = RawSegmentFile::open(&second_path).unwrap();
+        let query = vec![10, 30, 10];
+        let mut segments = [&mut first_segment, &mut second_segment];
+
+        let stats = RawBm25CorpusStats::from_raw_files(&mut segments, &query).unwrap();
+        assert_eq!(stats.num_docs(), 6);
+        assert_eq!(stats.df(10), Some(2));
+        assert_eq!(stats.df(30), Some(3));
+
+        let raw_hits = retrieve_bm25_raw_files_with_stats(
+            &mut segments,
+            &query,
+            10,
+            Bm25Params::default(),
+            &stats,
+        )
+        .unwrap();
+        let auto_stats_hits =
+            retrieve_bm25_raw_files(&mut segments, &query, 10, Bm25Params::default()).unwrap();
+        assert_eq!(auto_stats_hits, raw_hits);
+
+        let memory_query: Vec<String> = query.iter().map(ToString::to_string).collect();
+        let memory_hits = index
+            .retrieve(&memory_query, 10, Bm25Params::default())
+            .unwrap();
+
+        assert_eq!(raw_hits.len(), memory_hits.len());
+        for ((raw_doc, raw_score), (memory_doc, memory_score)) in
+            raw_hits.iter().zip(memory_hits.iter())
+        {
+            assert_eq!(raw_doc, memory_doc);
+            assert!(
+                (raw_score - memory_score).abs() < 1e-6,
+                "doc {raw_doc}: raw={raw_score}, memory={memory_score}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_bm25_file_with_stats_requires_stats_for_present_terms() {
+        let raw_docs = build_raw_docs();
+        let bytes = build_raw_bytes(&raw_docs);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw.segment");
+        std::fs::write(&path, &bytes).unwrap();
+        let mut file_segment = RawSegmentFile::open(&path).unwrap();
+        let stats = RawBm25CorpusStats::new(4, 2.0, []);
+
+        let err = retrieve_bm25_raw_file_with_stats(
+            &mut file_segment,
+            &[10],
+            3,
+            Bm25Params::default(),
+            &stats,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, RawScoringError::MissingCorpusStats(10)));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/lexir/badge.svg)](https://docs.rs/lexir)
 [![CI](https://github.com/arclabs561/lexir/actions/workflows/ci.yml/badge.svg)](https://github.com/arclabs561/lexir/actions/workflows/ci.yml)
 
-Lexical IR on top of postings lists.
+Lexical IR on top of postings lists
 
 **Status**: experimental. Published on `crates.io`; the API may still shift.
 
@@ -86,9 +86,14 @@ in-memory `InvertedIndex`:
 lexir = { version = "0.2", features = ["raw-segment"] }
 ```
 
-`lexir::raw::retrieve_bm25_raw_file` takes a mutable
-`postings::raw::RawSegmentFile`, query term ids, `k`, and `Bm25Params`. The
-caller owns the lexicon, commit lifecycle, deletes, and segment merge policy.
+`lexir::raw::retrieve_bm25_raw_file` scores one segment using that segment's
+local document frequencies. For an immutable segment set, use
+`retrieve_bm25_raw_files` or build `RawBm25CorpusStats` once and pass it to
+`retrieve_bm25_raw_files_with_stats`, so every segment uses the same IDF and
+average document length. Segment document ids must already be globally unique.
+
+The caller owns the lexicon, commit lifecycle, deletes, and segment merge
+policy.
 
 ## Features
 
