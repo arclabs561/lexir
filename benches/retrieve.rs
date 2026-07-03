@@ -96,6 +96,65 @@ fn write_raw_file(
     RawSegmentFile::open(path).unwrap()
 }
 
+#[cfg(feature = "raw-segment")]
+fn build_prunable_raw_files() -> (
+    tempfile::TempDir,
+    Vec<RawSegmentFile>,
+    lexir::raw::RawBm25CorpusStats,
+    Vec<RawTermId>,
+) {
+    const QUERY_TERM: RawTermId = 7;
+    const COLD_SEGMENTS: usize = 16;
+    const COLD_DOCS_PER_SEGMENT: usize = 8_192;
+
+    let dir = tempfile::tempdir().unwrap();
+    let query = vec![QUERY_TERM];
+    let hot_docs = vec![vec![(QUERY_TERM, 20), (999, 80)]; 128];
+    let mut segments = vec![write_raw_file(&dir, "hot.raw", &hot_docs, 0)];
+
+    for segment_id in 0..COLD_SEGMENTS {
+        let cold_docs = vec![vec![(QUERY_TERM, 1), (999, 99)]; COLD_DOCS_PER_SEGMENT];
+        segments.push(write_raw_file(
+            &dir,
+            &format!("cold-{segment_id}.raw"),
+            &cold_docs,
+            10_000 + (segment_id * COLD_DOCS_PER_SEGMENT) as u32,
+        ));
+    }
+
+    let mut segment_refs: Vec<_> = segments.iter_mut().collect();
+    let stats = lexir::raw::RawBm25CorpusStats::from_raw_files(&mut segment_refs, &query).unwrap();
+    drop(segment_refs);
+
+    (dir, segments, stats, query)
+}
+
+#[cfg(feature = "raw-segment")]
+fn top_k_bench_docs(mut docs: Vec<(u32, f32)>, k: usize) -> Vec<(u32, f32)> {
+    docs.retain(|(_, score)| score.is_finite() && *score > 0.0);
+    docs.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    docs.truncate(k);
+    docs
+}
+
+#[cfg(feature = "raw-segment")]
+fn retrieve_bm25_raw_files_without_segment_pruning(
+    segments: &mut [&mut RawSegmentFile],
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &lexir::raw::RawBm25CorpusStats,
+) -> Vec<(u32, f32)> {
+    let mut candidates = Vec::with_capacity(k.saturating_mul(segments.len()));
+    for segment in segments {
+        candidates.extend(
+            lexir::raw::retrieve_bm25_raw_file_with_stats(segment, query_terms, k, params, stats)
+                .unwrap(),
+        );
+    }
+    top_k_bench_docs(candidates, k)
+}
+
 fn bench_bm25_retrieve(c: &mut Criterion) {
     let index = build_index();
     let params = Bm25Params::default();
@@ -219,6 +278,38 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
             });
         },
     );
+
+    let (_prunable_dir, mut prunable_segments, prunable_stats, prunable_query) =
+        build_prunable_raw_files();
+    group.bench_function("files_prunable_with_stats", |b| {
+        b.iter(|| {
+            let mut segments: Vec<_> = prunable_segments.iter_mut().collect();
+            black_box(
+                lexir::raw::retrieve_bm25_raw_files_with_stats(
+                    black_box(segments.as_mut_slice()),
+                    black_box(prunable_query.as_slice()),
+                    10,
+                    params,
+                    black_box(&prunable_stats),
+                )
+                .unwrap(),
+            );
+        });
+    });
+
+    let (_exact_dir, mut exact_segments, exact_stats, exact_query) = build_prunable_raw_files();
+    group.bench_function("files_forced_all_segments_with_stats", |b| {
+        b.iter(|| {
+            let mut segments: Vec<_> = exact_segments.iter_mut().collect();
+            black_box(retrieve_bm25_raw_files_without_segment_pruning(
+                black_box(segments.as_mut_slice()),
+                black_box(exact_query.as_slice()),
+                10,
+                params,
+                black_box(&exact_stats),
+            ));
+        });
+    });
 
     group.finish();
 }
