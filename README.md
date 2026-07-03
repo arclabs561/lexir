@@ -72,7 +72,23 @@ assert!(!hits.is_empty());
 
 ## Examples
 
-Runnable examples live in [`examples/`](examples/), including `readme_examples`, which exercises the snippets shown above.
+Runnable examples live in [`examples/`](examples/), including `readme_examples`,
+which exercises the snippets shown above, and `raw_bm25_segment`, which scores a
+file-backed `postings::raw::RawSegmentFile`.
+
+## File-backed BM25
+
+Enable `raw-segment` to score numeric postings segments without opening a full
+in-memory `InvertedIndex`:
+
+```toml
+[dependencies]
+lexir = { version = "0.2", features = ["raw-segment"] }
+```
+
+`lexir::raw::retrieve_bm25_raw_file` takes a mutable
+`postings::raw::RawSegmentFile`, query term ids, `k`, and `Bm25Params`. The
+caller owns the lexicon, commit lifecycle, deletes, and segment merge policy.
 
 ## Features
 
@@ -80,6 +96,7 @@ Runnable examples live in [`examples/`](examples/), including `readme_examples`,
 - `recordlog`: append-only operation logs for rebuildable indexes (CLI uses this)
 - `cli`: enables the `lexir` CLI (debugging + end-to-end validation)
 - `fuzzy`: fuzzy query expansion via `gramdex` — expands only **OOV terms** (terms not in the index); in-vocabulary terms are used as-is
+- `raw-segment`: BM25 scoring over `postings::raw` byte- and file-backed segments
 
 ## CLI (with `--features cli`)
 

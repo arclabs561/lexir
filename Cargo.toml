@@ -49,3 +49,7 @@ path = "src/bin/lexir.rs"
 [[bench]]
 name = "retrieve"
 harness = false
+
+[[example]]
+name = "raw_bm25_segment"
+required-features = ["raw-segment"]

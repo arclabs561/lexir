@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added a `raw_bm25_segment` example showing BM25 scoring over a file-backed
+  `postings::raw::RawSegmentFile`.
+
 ## [0.2.0] - 2026-07-02
 
 ### Changed
