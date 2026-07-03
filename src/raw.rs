@@ -505,18 +505,22 @@ struct WeightedRawTerm {
 }
 
 fn raw_term_multiplicities(query_terms: &[RawTermId]) -> Vec<WeightedRawTerm> {
-    let mut counts: Vec<WeightedRawTerm> = Vec::with_capacity(query_terms.len());
+    let mut terms = query_terms.to_vec();
+    terms.sort_unstable();
 
-    for &term_id in query_terms {
-        if let Some(seen) = counts.iter_mut().find(|seen| seen.term_id == term_id) {
-            seen.count += 1;
-        } else {
-            counts.push(WeightedRawTerm {
-                term_id,
-                count: 1,
-                idf: 0.0,
-            });
+    let mut counts: Vec<WeightedRawTerm> = Vec::with_capacity(terms.len());
+    for term_id in terms {
+        if let Some(last) = counts.last_mut() {
+            if last.term_id == term_id {
+                last.count += 1;
+                continue;
+            }
         }
+        counts.push(WeightedRawTerm {
+            term_id,
+            count: 1,
+            idf: 0.0,
+        });
     }
     counts
 }
@@ -721,5 +725,16 @@ mod tests {
             assert_eq!(single_doc, dup_doc);
             assert!((dup_score - single_score * 2.0).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn raw_term_multiplicities_sort_and_count_duplicates() {
+        let terms = raw_term_multiplicities(&[30, 10, 30, 20, 10, 10]);
+        let observed: Vec<_> = terms
+            .iter()
+            .map(|term| (term.term_id, term.count, term.idf))
+            .collect();
+
+        assert_eq!(observed, vec![(10, 3, 0.0), (20, 1, 0.0), (30, 2, 0.0)]);
     }
 }

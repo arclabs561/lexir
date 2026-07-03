@@ -147,6 +147,28 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
         });
     }
 
+    let duplicate_query: Vec<_> = raw_query_terms(&segment, 32, 20)
+        .into_iter()
+        .flat_map(|term| std::iter::repeat(term).take(16))
+        .collect();
+    group.bench_with_input(
+        BenchmarkId::new("file_duplicate_terms", duplicate_query.len()),
+        &duplicate_query,
+        |b, query| {
+            b.iter(|| {
+                black_box(
+                    lexir::raw::retrieve_bm25_raw_file(
+                        black_box(&mut segment),
+                        black_box(query.as_slice()),
+                        10,
+                        params,
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+
     group.finish();
 }
 
