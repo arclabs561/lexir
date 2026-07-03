@@ -181,6 +181,7 @@ trait RawSegmentRead {
     fn avg_doc_len(&self) -> f32;
     fn df(&mut self, term_id: RawTermId) -> Result<u32, Self::Error>;
     fn document_len(&mut self, doc_id: DocId) -> Result<Option<u32>, Self::Error>;
+    fn for_each_document_len(&mut self, visit: impl FnMut(DocId, u32)) -> Result<(), Self::Error>;
     fn postings(&mut self, term_id: RawTermId) -> Result<Vec<(DocId, u32)>, Self::Error>;
     fn for_each_posting_with_document_len(
         &mut self,
@@ -210,6 +211,10 @@ impl RawSegmentRead for RawSegment<'_> {
 
     fn document_len(&mut self, doc_id: DocId) -> Result<Option<u32>, Self::Error> {
         RawSegment::document_len(self, doc_id)
+    }
+
+    fn for_each_document_len(&mut self, visit: impl FnMut(DocId, u32)) -> Result<(), Self::Error> {
+        RawSegment::for_each_document_len(self, visit)
     }
 
     fn postings(&mut self, term_id: RawTermId) -> Result<Vec<(DocId, u32)>, Self::Error> {
@@ -246,6 +251,10 @@ impl RawSegmentRead for RawSegmentFile {
 
     fn document_len(&mut self, doc_id: DocId) -> Result<Option<u32>, Self::Error> {
         Ok(RawSegmentFile::document_len(self, doc_id)?)
+    }
+
+    fn for_each_document_len(&mut self, visit: impl FnMut(DocId, u32)) -> Result<(), Self::Error> {
+        Ok(RawSegmentFile::for_each_document_len(self, visit)?)
     }
 
     fn postings(&mut self, term_id: RawTermId) -> Result<Vec<(DocId, u32)>, Self::Error> {
@@ -447,15 +456,15 @@ where
     }
 
     if let Some(slots) = dense_bm25_slots(segment.max_doc_id(), touched_upper_bound) {
-        return retrieve_bm25_raw_dense(
-            segment,
-            should_stream_bm25(terms.len(), touched_upper_bound),
-            terms,
+        let dense_plan = DenseRawBm25Plan {
+            stream_postings: should_stream_bm25(terms.len(), touched_upper_bound),
             slots,
-            k,
-            params,
-            avg_doc_len,
-        );
+            prefill_doc_lengths: should_prefill_dense_doc_lengths(
+                segment.num_docs(),
+                touched_upper_bound,
+            ),
+        };
+        return retrieve_bm25_raw_dense(segment, dense_plan, terms, k, params, avg_doc_len);
     }
 
     let stream_postings = should_stream_bm25(terms.len(), touched_upper_bound);
@@ -519,11 +528,16 @@ where
     Ok(top_k_positive_scored_docs(scores, k))
 }
 
+struct DenseRawBm25Plan {
+    stream_postings: bool,
+    slots: usize,
+    prefill_doc_lengths: bool,
+}
+
 fn retrieve_bm25_raw_dense<S>(
     segment: &mut S,
-    stream_postings: bool,
+    plan: DenseRawBm25Plan,
     terms: Vec<WeightedRawTerm>,
-    slots: usize,
     k: usize,
     params: Bm25Params,
     avg_doc_len: f32,
@@ -531,12 +545,13 @@ fn retrieve_bm25_raw_dense<S>(
 where
     S: RawSegmentRead,
 {
+    let slots = plan.slots;
     let mut scores = vec![0.0; slots];
-    let mut doc_lengths = (!stream_postings).then(|| vec![0u32; slots]);
+    let mut doc_lengths = (!plan.stream_postings).then(|| vec![0u32; slots]);
     let mut seen = vec![false; slots];
     let mut touched = Vec::new();
 
-    if stream_postings {
+    if plan.stream_postings {
         for term in terms {
             if term.idf == 0.0 {
                 continue;
@@ -568,6 +583,16 @@ where
         let doc_lengths = doc_lengths
             .as_mut()
             .expect("dense doc-length cache exists for non-streaming path");
+        if plan.prefill_doc_lengths {
+            segment
+                .for_each_document_len(|doc_id, doc_length| {
+                    let slot = doc_id as usize;
+                    if slot < slots {
+                        doc_lengths[slot] = doc_length;
+                    }
+                })
+                .map_err(RawScoringError::Source)?;
+        }
         for term in terms {
             if term.idf == 0.0 {
                 continue;
@@ -612,6 +637,10 @@ where
             .map(|doc_id| (doc_id, scores[doc_id as usize])),
         k,
     ))
+}
+
+fn should_prefill_dense_doc_lengths(num_docs: u32, touched_upper_bound: usize) -> bool {
+    touched_upper_bound > 0 && touched_upper_bound >= (num_docs as usize).div_ceil(2)
 }
 
 const DENSE_BM25_MAX_SLOTS: usize = 1_000_000;
@@ -1191,6 +1220,15 @@ mod tests {
             STREAMING_BM25_MAX_QUERY_TERMS + 1,
             STREAMING_BM25_MIN_TOUCHED_POSTINGS
         ));
+    }
+
+    #[test]
+    fn dense_doc_length_prefill_requires_broad_queries() {
+        assert!(!should_prefill_dense_doc_lengths(1, 0));
+        assert!(should_prefill_dense_doc_lengths(1, 1));
+        assert!(!should_prefill_dense_doc_lengths(20_000, 9_999));
+        assert!(should_prefill_dense_doc_lengths(20_000, 10_000));
+        assert!(should_prefill_dense_doc_lengths(20_000, 100_000));
     }
 
     #[test]

@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a raw BM25 pruning regression that checks a dominated segment is
   skipped while preserving the in-memory ranking.
 
+### Changed
+- Changed file-backed raw BM25 broad-query scoring to prefill dense
+  document-length caches from raw segment metadata instead of doing repeated
+  per-document metadata lookups.
+
 ## [0.2.1] - 2026-07-03
 
 ### Added
