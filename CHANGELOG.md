@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added the `raw-segment` feature with `retrieve_bm25_raw_segment` and
+  `retrieve_bm25_raw_file`, scoring BM25 directly over postings' immutable raw
+  segments (in-memory or file-backed) without building an inverted index.
 - Added corpus-level raw BM25 stats and multi-file raw-segment retrieval helpers
   so immutable file-backed segments can be scored as one corpus.
 - Added a `raw_bm25_segment` example showing BM25 scoring over a file-backed
