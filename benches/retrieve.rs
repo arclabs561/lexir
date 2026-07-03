@@ -305,6 +305,59 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
         },
     );
 
+    group.bench_with_input(
+        BenchmarkId::new("files_query_stats_build", multi_query.len()),
+        &multi_query,
+        |b, query| {
+            b.iter(|| {
+                let mut segments: Vec<_> = multi_segments.iter_mut().collect();
+                black_box(
+                    lexir::raw::RawBm25CorpusStats::from_raw_files(
+                        black_box(segments.as_mut_slice()),
+                        black_box(query.as_slice()),
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+
+    group.bench_function("files_all_terms_stats_build", |b| {
+        b.iter(|| {
+            let mut segments: Vec<_> = multi_segments.iter_mut().collect();
+            black_box(
+                lexir::raw::RawBm25CorpusStats::from_raw_files_all_terms(black_box(
+                    segments.as_mut_slice(),
+                ))
+                .unwrap(),
+            );
+        });
+    });
+
+    let mut all_stats_refs: Vec<_> = multi_segments.iter_mut().collect();
+    let all_term_stats =
+        lexir::raw::RawBm25CorpusStats::from_raw_files_all_terms(&mut all_stats_refs).unwrap();
+    drop(all_stats_refs);
+    group.bench_with_input(
+        BenchmarkId::new("files_terms_all_stats", multi_query.len()),
+        &multi_query,
+        |b, query| {
+            let mut segments: Vec<_> = multi_segments.iter_mut().collect();
+            b.iter(|| {
+                black_box(
+                    lexir::raw::retrieve_bm25_raw_files_with_stats(
+                        black_box(segments.as_mut_slice()),
+                        black_box(query.as_slice()),
+                        10,
+                        params,
+                        black_box(&all_term_stats),
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+
     let (_prunable_dir, mut prunable_segments, prunable_stats, prunable_query) =
         build_prunable_raw_files();
     group.bench_function("files_prunable_with_stats", |b| {
