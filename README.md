@@ -93,8 +93,9 @@ local document frequencies. For an immutable segment set, use
 average document length. The multi-file path orders segments by a conservative
 BM25 upper bound and can skip segments that cannot enter the current top-k.
 Use `retrieve_bm25_raw_files_with_search_stats` when you need searched/pruned
-segment counts for profiling. Segment document ids must already be globally
-unique.
+segment counts for profiling. `RawBm25CorpusStats::from_raw_files_all_terms`
+builds reusable stats for all terms in a raw segment generation without reading
+postings payloads. Segment document ids must already be globally unique.
 
 The caller owns the lexicon, commit lifecycle, deletes, and segment merge
 policy.

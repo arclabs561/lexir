@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `RawBm25CorpusStats::from_raw_files_all_terms` for reusable BM25 stats
+  over immutable raw segment sets without reading postings payloads.
+
 ## [0.2.3] - 2026-07-03
 
 ### Changed

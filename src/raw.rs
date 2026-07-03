@@ -147,6 +147,45 @@ impl RawBm25CorpusStats {
         })
     }
 
+    /// Build corpus stats for all terms present in file-backed raw segments.
+    ///
+    /// This reads fixed segment directories, not postings payloads. Use this
+    /// when serving many queries over the same immutable segment set and the
+    /// caller wants to compute BM25 corpus statistics once per generation.
+    pub fn from_raw_files_all_terms(
+        segments: &mut [&mut RawSegmentFile],
+    ) -> Result<Self, RawScoringError<RawSegmentFileError>> {
+        let mut num_docs = 0u32;
+        let mut total_doc_len = 0.0f64;
+        let mut dfs = HashMap::new();
+
+        for segment in segments.iter_mut() {
+            let segment_docs = segment.num_docs();
+            num_docs = num_docs.saturating_add(segment_docs);
+            total_doc_len += segment.avg_doc_len() as f64 * segment_docs as f64;
+
+            for term_id in segment
+                .term_ids()
+                .map_err(RawSegmentFileError::from)
+                .map_err(RawScoringError::Source)?
+            {
+                let df = segment.df(term_id).map_err(RawScoringError::Source)?;
+                let total_df = dfs.entry(term_id).or_insert(0u32);
+                *total_df = total_df.saturating_add(df);
+            }
+        }
+
+        if num_docs == 0 {
+            return Err(RawScoringError::EmptyIndex);
+        }
+
+        Ok(Self {
+            num_docs,
+            avg_doc_len: (total_doc_len / num_docs as f64) as f32,
+            dfs,
+        })
+    }
+
     fn from_reader<S>(
         segment: &mut S,
         query_terms: &[RawTermId],
@@ -1066,6 +1105,13 @@ mod tests {
         assert_eq!(stats.num_docs(), 6);
         assert_eq!(stats.df(10), Some(2));
         assert_eq!(stats.df(30), Some(3));
+        assert_eq!(stats.df(40), None);
+
+        let all_stats = RawBm25CorpusStats::from_raw_files_all_terms(&mut segments).unwrap();
+        assert_eq!(all_stats.num_docs(), 6);
+        assert_eq!(all_stats.df(10), Some(2));
+        assert_eq!(all_stats.df(30), Some(3));
+        assert_eq!(all_stats.df(40), Some(1));
 
         let raw_hits = retrieve_bm25_raw_files_with_stats(
             &mut segments,
@@ -1075,9 +1121,18 @@ mod tests {
             &stats,
         )
         .unwrap();
+        let all_stats_hits = retrieve_bm25_raw_files_with_stats(
+            &mut segments,
+            &query,
+            10,
+            Bm25Params::default(),
+            &all_stats,
+        )
+        .unwrap();
         let auto_stats_hits =
             retrieve_bm25_raw_files(&mut segments, &query, 10, Bm25Params::default()).unwrap();
         assert_eq!(auto_stats_hits, raw_hits);
+        assert_eq!(all_stats_hits, raw_hits);
 
         let memory_query: Vec<String> = query.iter().map(ToString::to_string).collect();
         let memory_hits = index
