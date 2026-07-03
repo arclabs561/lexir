@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Changed raw-segment BM25 scoring to use dense score and document-length
   accumulators for dense doc-id segments, while keeping the sparse HashMap path
   for high-id sparse segments.
+- Changed raw-segment BM25 scoring to stream postings with document lengths for
+  short raw queries while keeping the document-length cache path for
+  expansion-heavy queries.
 
 ## [0.2.0] - 2026-07-02
 

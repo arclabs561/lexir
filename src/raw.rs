@@ -182,6 +182,11 @@ trait RawSegmentRead {
     fn df(&mut self, term_id: RawTermId) -> Result<u32, Self::Error>;
     fn document_len(&mut self, doc_id: DocId) -> Result<Option<u32>, Self::Error>;
     fn postings(&mut self, term_id: RawTermId) -> Result<Vec<(DocId, u32)>, Self::Error>;
+    fn for_each_posting_with_document_len(
+        &mut self,
+        term_id: RawTermId,
+        visit: impl FnMut(DocId, u32, u32),
+    ) -> Result<(), Self::Error>;
 }
 
 impl RawSegmentRead for RawSegment<'_> {
@@ -210,6 +215,14 @@ impl RawSegmentRead for RawSegment<'_> {
     fn postings(&mut self, term_id: RawTermId) -> Result<Vec<(DocId, u32)>, Self::Error> {
         RawSegment::postings(self, term_id)?.collect()
     }
+
+    fn for_each_posting_with_document_len(
+        &mut self,
+        term_id: RawTermId,
+        visit: impl FnMut(DocId, u32, u32),
+    ) -> Result<(), Self::Error> {
+        RawSegment::for_each_posting_with_document_len(self, term_id, visit)
+    }
 }
 
 impl RawSegmentRead for RawSegmentFile {
@@ -237,6 +250,14 @@ impl RawSegmentRead for RawSegmentFile {
 
     fn postings(&mut self, term_id: RawTermId) -> Result<Vec<(DocId, u32)>, Self::Error> {
         RawSegmentFile::postings(self, term_id)
+    }
+
+    fn for_each_posting_with_document_len(
+        &mut self,
+        term_id: RawTermId,
+        visit: impl FnMut(DocId, u32, u32),
+    ) -> Result<(), Self::Error> {
+        RawSegmentFile::for_each_posting_with_document_len(self, term_id, visit)
     }
 }
 
@@ -387,40 +408,71 @@ where
     }
 
     if let Some(slots) = dense_bm25_slots(segment.max_doc_id(), touched_upper_bound) {
-        return retrieve_bm25_raw_dense(segment, terms, slots, k, params, avg_doc_len);
+        return retrieve_bm25_raw_dense(
+            segment,
+            should_stream_bm25(terms.len(), touched_upper_bound),
+            terms,
+            slots,
+            k,
+            params,
+            avg_doc_len,
+        );
     }
 
+    let stream_postings = should_stream_bm25(terms.len(), touched_upper_bound);
     let capacity = touched_upper_bound.min(stats.num_docs() as usize);
     let mut scores = HashMap::with_capacity(capacity);
-    let mut doc_lengths = HashMap::with_capacity(capacity);
-    for term in terms {
-        if term.idf == 0.0 {
-            continue;
-        }
-        for (doc_id, tf) in segment
-            .postings(term.term_id)
-            .map_err(RawScoringError::Source)?
-        {
-            let doc_length = match doc_lengths.get(&doc_id) {
-                Some(&len) => len,
-                None => {
-                    let len = segment
-                        .document_len(doc_id)
-                        .map_err(RawScoringError::Source)?
-                        .unwrap_or(0);
-                    doc_lengths.insert(doc_id, len);
-                    len
-                }
-            };
-            if doc_length == 0 {
+    if stream_postings {
+        for term in terms {
+            if term.idf == 0.0 {
                 continue;
             }
+            segment
+                .for_each_posting_with_document_len(term.term_id, |doc_id, tf, doc_length| {
+                    if doc_length == 0 {
+                        return;
+                    }
 
-            let tf_score = bm25_tf_score(tf as f32, doc_length as f32, avg_doc_len, params);
-            let contribution = term.idf * tf_score;
-            if contribution != 0.0 {
-                let score = scores.entry(doc_id).or_insert(0.0);
-                *score += contribution * term.count as f32;
+                    let tf_score = bm25_tf_score(tf as f32, doc_length as f32, avg_doc_len, params);
+                    let contribution = term.idf * tf_score;
+                    if contribution != 0.0 {
+                        let score = scores.entry(doc_id).or_insert(0.0);
+                        *score += contribution * term.count as f32;
+                    }
+                })
+                .map_err(RawScoringError::Source)?;
+        }
+    } else {
+        let mut doc_lengths = HashMap::with_capacity(capacity);
+        for term in terms {
+            if term.idf == 0.0 {
+                continue;
+            }
+            for (doc_id, tf) in segment
+                .postings(term.term_id)
+                .map_err(RawScoringError::Source)?
+            {
+                let doc_length = match doc_lengths.get(&doc_id) {
+                    Some(&len) => len,
+                    None => {
+                        let len = segment
+                            .document_len(doc_id)
+                            .map_err(RawScoringError::Source)?
+                            .unwrap_or(0);
+                        doc_lengths.insert(doc_id, len);
+                        len
+                    }
+                };
+                if doc_length == 0 {
+                    continue;
+                }
+
+                let tf_score = bm25_tf_score(tf as f32, doc_length as f32, avg_doc_len, params);
+                let contribution = term.idf * tf_score;
+                if contribution != 0.0 {
+                    let score = scores.entry(doc_id).or_insert(0.0);
+                    *score += contribution * term.count as f32;
+                }
             }
         }
     }
@@ -430,6 +482,7 @@ where
 
 fn retrieve_bm25_raw_dense<S>(
     segment: &mut S,
+    stream_postings: bool,
     terms: Vec<WeightedRawTerm>,
     slots: usize,
     k: usize,
@@ -440,43 +493,76 @@ where
     S: RawSegmentRead,
 {
     let mut scores = vec![0.0; slots];
-    let mut doc_lengths = vec![0u32; slots];
+    let mut doc_lengths = (!stream_postings).then(|| vec![0u32; slots]);
     let mut seen = vec![false; slots];
     let mut touched = Vec::new();
 
-    for term in terms {
-        if term.idf == 0.0 {
-            continue;
+    if stream_postings {
+        for term in terms {
+            if term.idf == 0.0 {
+                continue;
+            }
+            segment
+                .for_each_posting_with_document_len(term.term_id, |doc_id, tf, doc_length| {
+                    let slot = doc_id as usize;
+                    if slot >= slots {
+                        return;
+                    }
+                    if !seen[slot] {
+                        seen[slot] = true;
+                        touched.push(doc_id);
+                    }
+
+                    if doc_length == 0 {
+                        return;
+                    }
+
+                    let tf_score = bm25_tf_score(tf as f32, doc_length as f32, avg_doc_len, params);
+                    let contribution = term.idf * tf_score;
+                    if contribution != 0.0 {
+                        scores[slot] += contribution * term.count as f32;
+                    }
+                })
+                .map_err(RawScoringError::Source)?;
         }
-        for (doc_id, tf) in segment
-            .postings(term.term_id)
-            .map_err(RawScoringError::Source)?
-        {
-            let slot = doc_id as usize;
-            if slot >= slots {
+    } else {
+        let doc_lengths = doc_lengths
+            .as_mut()
+            .expect("dense doc-length cache exists for non-streaming path");
+        for term in terms {
+            if term.idf == 0.0 {
                 continue;
             }
-            if !seen[slot] {
-                seen[slot] = true;
-                touched.push(doc_id);
-            }
+            for (doc_id, tf) in segment
+                .postings(term.term_id)
+                .map_err(RawScoringError::Source)?
+            {
+                let slot = doc_id as usize;
+                if slot >= slots {
+                    continue;
+                }
+                if !seen[slot] {
+                    seen[slot] = true;
+                    touched.push(doc_id);
+                }
 
-            let mut doc_length = doc_lengths[slot];
-            if doc_length == 0 {
-                doc_length = segment
-                    .document_len(doc_id)
-                    .map_err(RawScoringError::Source)?
-                    .unwrap_or(0);
-                doc_lengths[slot] = doc_length;
-            }
-            if doc_length == 0 {
-                continue;
-            }
+                let mut doc_length = doc_lengths[slot];
+                if doc_length == 0 {
+                    doc_length = segment
+                        .document_len(doc_id)
+                        .map_err(RawScoringError::Source)?
+                        .unwrap_or(0);
+                    doc_lengths[slot] = doc_length;
+                }
+                if doc_length == 0 {
+                    continue;
+                }
 
-            let tf_score = bm25_tf_score(tf as f32, doc_length as f32, avg_doc_len, params);
-            let contribution = term.idf * tf_score;
-            if contribution != 0.0 {
-                scores[slot] += contribution * term.count as f32;
+                let tf_score = bm25_tf_score(tf as f32, doc_length as f32, avg_doc_len, params);
+                let contribution = term.idf * tf_score;
+                if contribution != 0.0 {
+                    scores[slot] += contribution * term.count as f32;
+                }
             }
         }
     }
@@ -490,11 +576,18 @@ where
 }
 
 const DENSE_BM25_MAX_SLOTS: usize = 1_000_000;
+const STREAMING_BM25_MAX_QUERY_TERMS: usize = 8;
+const STREAMING_BM25_MIN_TOUCHED_POSTINGS: usize = 1_000_000;
 
 fn dense_bm25_slots(max_doc_id: DocId, touched_upper_bound: usize) -> Option<usize> {
     let slots = usize::try_from(max_doc_id).ok()?.checked_add(1)?;
     let useful_limit = touched_upper_bound.saturating_mul(2).max(4096);
     (slots <= DENSE_BM25_MAX_SLOTS && slots <= useful_limit).then_some(slots)
+}
+
+fn should_stream_bm25(unique_terms: usize, touched_upper_bound: usize) -> bool {
+    unique_terms <= STREAMING_BM25_MAX_QUERY_TERMS
+        || touched_upper_bound >= STREAMING_BM25_MIN_TOUCHED_POSTINGS
 }
 
 #[derive(Debug)]
@@ -736,5 +829,19 @@ mod tests {
             .collect();
 
         assert_eq!(observed, vec![(10, 3, 0.0), (20, 1, 0.0), (30, 2, 0.0)]);
+    }
+
+    #[test]
+    fn raw_bm25_streaming_policy_keeps_expanded_queries_cached() {
+        assert!(should_stream_bm25(2, 20_000));
+        assert!(should_stream_bm25(STREAMING_BM25_MAX_QUERY_TERMS, 20_000));
+        assert!(!should_stream_bm25(
+            STREAMING_BM25_MAX_QUERY_TERMS + 1,
+            STREAMING_BM25_MIN_TOUCHED_POSTINGS - 1
+        ));
+        assert!(should_stream_bm25(
+            STREAMING_BM25_MAX_QUERY_TERMS + 1,
+            STREAMING_BM25_MIN_TOUCHED_POSTINGS
+        ));
     }
 }
