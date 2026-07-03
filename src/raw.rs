@@ -4,7 +4,7 @@
 //! and use `postings` raw segments for storage, while `lexir` supplies BM25
 //! scoring and deterministic top-k ranking.
 
-use crate::bm25::{bm25_tf_score, Bm25Params};
+use crate::bm25::{bm25_tf_score, Bm25Params, Bm25Variant};
 use crate::ranking::top_k_positive_scored_docs;
 use postings::raw::{RawSegment, RawSegmentFile, RawSegmentFileError, RawTermId};
 use postings::DocId;
@@ -353,15 +353,54 @@ pub fn retrieve_bm25_raw_files_with_stats(
         return Ok(Vec::new());
     }
 
+    let avg_doc_len = stats.avg_doc_len();
+    if avg_doc_len <= 0.0 || !avg_doc_len.is_finite() {
+        return Ok(Vec::new());
+    }
+
+    let terms = raw_term_multiplicities(query_terms);
     let mut candidates = Vec::with_capacity(k.saturating_mul(segments.len()));
-    for segment in segments.iter_mut() {
+    let mut order = Vec::with_capacity(segments.len());
+    for (index, segment) in segments.iter().enumerate() {
+        let mut upper_bound = 0.0;
+        for term in &terms {
+            let max_tf = segment
+                .max_weight(term.term_id)
+                .map_err(RawSegmentFileError::from)
+                .map_err(RawScoringError::Source)?;
+            if max_tf == 0 {
+                continue;
+            }
+            let corpus_df = stats
+                .df(term.term_id)
+                .ok_or(RawScoringError::MissingCorpusStats(term.term_id))?;
+            if corpus_df == 0 {
+                continue;
+            }
+            let idf = bm25_idf_plus1(stats.num_docs(), corpus_df);
+            upper_bound +=
+                idf * term.count as f32 * bm25_tf_upper_bound(max_tf as f32, avg_doc_len, params);
+        }
+        order.push((index, upper_bound));
+    }
+    order.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+
+    let mut threshold = 0.0;
+    for (index, upper_bound) in order {
+        if candidates.len() >= k && upper_bound < threshold {
+            continue;
+        }
         candidates.extend(retrieve_bm25_raw_file_with_stats(
-            segment,
+            segments[index],
             query_terms,
             k,
             params,
             stats,
         )?);
+        if candidates.len() >= k {
+            candidates = top_k_positive_scored_docs(candidates, k);
+            threshold = candidates.last().map_or(0.0, |(_, score)| *score);
+        }
     }
 
     Ok(top_k_positive_scored_docs(candidates, k))
@@ -590,6 +629,21 @@ fn should_stream_bm25(unique_terms: usize, touched_upper_bound: usize) -> bool {
         || touched_upper_bound >= STREAMING_BM25_MIN_TOUCHED_POSTINGS
 }
 
+fn bm25_tf_upper_bound(max_tf: f32, avg_doc_len: f32, params: Bm25Params) -> f32 {
+    if max_tf <= 0.0 {
+        return 0.0;
+    }
+
+    let saturated = params.k1.max(0.0) + 1.0;
+    match params.variant {
+        Bm25Variant::Standard => bm25_tf_score(max_tf, 0.0, avg_doc_len, params).min(saturated),
+        Bm25Variant::BM25L { .. } => saturated,
+        Bm25Variant::BM25Plus { delta } => {
+            bm25_tf_score(max_tf, 0.0, avg_doc_len, params).min(saturated + delta.max(0.0))
+        }
+    }
+}
+
 #[derive(Debug)]
 struct WeightedRawTerm {
     term_id: RawTermId,
@@ -780,6 +834,61 @@ mod tests {
     }
 
     #[test]
+    fn raw_bm25_files_do_not_prune_equal_bound_tie() {
+        let first = vec![(10, vec![(7, 5)])];
+        let second = vec![(1, vec![(7, 5)])];
+        let dir = tempfile::tempdir().unwrap();
+        let first_path = dir.path().join("first.raw");
+        let second_path = dir.path().join("second.raw");
+        std::fs::write(&first_path, build_raw_bytes_with_doc_ids(&first)).unwrap();
+        std::fs::write(&second_path, build_raw_bytes_with_doc_ids(&second)).unwrap();
+        let mut first_segment = RawSegmentFile::open(&first_path).unwrap();
+        let mut second_segment = RawSegmentFile::open(&second_path).unwrap();
+        let mut segments = [&mut first_segment, &mut second_segment];
+        let query = vec![7];
+        let stats = RawBm25CorpusStats::from_raw_files(&mut segments, &query).unwrap();
+
+        assert_eq!(
+            retrieve_bm25_raw_files_with_stats(
+                &mut segments,
+                &query,
+                1,
+                Bm25Params::default(),
+                &stats
+            )
+            .unwrap()
+            .first()
+            .map(|(doc_id, _)| *doc_id),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn raw_bm25_files_require_stats_before_pruning_present_terms() {
+        let first = vec![(10, vec![(7, 100)])];
+        let second = vec![(1, vec![(8, 1)])];
+        let dir = tempfile::tempdir().unwrap();
+        let first_path = dir.path().join("first.raw");
+        let second_path = dir.path().join("second.raw");
+        std::fs::write(&first_path, build_raw_bytes_with_doc_ids(&first)).unwrap();
+        std::fs::write(&second_path, build_raw_bytes_with_doc_ids(&second)).unwrap();
+        let mut first_segment = RawSegmentFile::open(&first_path).unwrap();
+        let mut second_segment = RawSegmentFile::open(&second_path).unwrap();
+        let mut segments = [&mut first_segment, &mut second_segment];
+
+        let err = retrieve_bm25_raw_files_with_stats(
+            &mut segments,
+            &[7, 8],
+            1,
+            Bm25Params::default(),
+            &RawBm25CorpusStats::new(2, 1.0, [(7, 1)]),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, RawScoringError::MissingCorpusStats(8)));
+    }
+
+    #[test]
     fn raw_bm25_file_with_stats_requires_stats_for_present_terms() {
         let raw_docs = build_raw_docs();
         let bytes = build_raw_bytes(&raw_docs);
@@ -843,5 +952,32 @@ mod tests {
             STREAMING_BM25_MAX_QUERY_TERMS + 1,
             STREAMING_BM25_MIN_TOUCHED_POSTINGS
         ));
+    }
+
+    #[test]
+    fn bm25_tf_upper_bound_covers_supported_variants() {
+        let params = [
+            Bm25Params::default(),
+            Bm25Params::bm25l(),
+            Bm25Params {
+                k1: 1.2,
+                b: -3.0,
+                variant: Bm25Variant::bm25l_with_delta(0.25),
+            },
+            Bm25Params::bm25plus(),
+        ];
+
+        for params in params {
+            let bound = bm25_tf_upper_bound(7.0, 4.0, params);
+            for tf in [1.0, 3.0, 7.0] {
+                for doc_len in [0.0, 1.0, 4.0, 20.0] {
+                    let score = bm25_tf_score(tf, doc_len, 4.0, params);
+                    assert!(
+                        score <= bound + 1e-6,
+                        "score={score} exceeded bound={bound} for {params:?}"
+                    );
+                }
+            }
+        }
     }
 }

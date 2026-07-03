@@ -79,6 +79,23 @@ fn raw_query_terms(segment: &RawSegmentFile, count: usize, min_df: u32) -> Vec<R
         .collect()
 }
 
+#[cfg(feature = "raw-segment")]
+fn write_raw_file(
+    dir: &tempfile::TempDir,
+    name: &str,
+    raw_docs: &[Vec<(RawTermId, u32)>],
+    start_doc_id: u32,
+) -> RawSegmentFile {
+    let docs: Vec<_> = raw_docs
+        .iter()
+        .enumerate()
+        .map(|(doc_id, terms)| RawDocument::new(start_doc_id + doc_id as u32, terms))
+        .collect();
+    let path = dir.path().join(name);
+    std::fs::write(&path, write_u64_u32_segment(&docs).unwrap()).unwrap();
+    RawSegmentFile::open(path).unwrap()
+}
+
 fn bench_bm25_retrieve(c: &mut Criterion) {
     let index = build_index();
     let params = Bm25Params::default();
@@ -159,6 +176,40 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
                 black_box(
                     lexir::raw::retrieve_bm25_raw_file(
                         black_box(&mut segment),
+                        black_box(query.as_slice()),
+                        10,
+                        params,
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let chunk_len = raw_docs.len().div_ceil(4);
+    let mut multi_segments: Vec<_> = raw_docs
+        .chunks(chunk_len)
+        .enumerate()
+        .map(|(chunk_id, chunk)| {
+            write_raw_file(
+                &dir,
+                &format!("chunk-{chunk_id}.raw"),
+                chunk,
+                (chunk_id * chunk_len) as u32,
+            )
+        })
+        .collect();
+    let multi_query = raw_query_terms(&segment, 8, 20);
+    group.bench_with_input(
+        BenchmarkId::new("files_terms", multi_query.len()),
+        &multi_query,
+        |b, query| {
+            b.iter(|| {
+                let mut segments: Vec<_> = multi_segments.iter_mut().collect();
+                black_box(
+                    lexir::raw::retrieve_bm25_raw_files(
+                        black_box(segments.as_mut_slice()),
                         black_box(query.as_slice()),
                         10,
                         params,
