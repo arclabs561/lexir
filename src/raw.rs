@@ -49,6 +49,7 @@ trait RawSegmentRead {
     type Error;
 
     fn num_docs(&self) -> u32;
+    fn max_doc_id(&self) -> DocId;
     fn avg_doc_len(&self) -> f32;
     fn df(&mut self, term_id: RawTermId) -> Result<u32, Self::Error>;
     fn document_len(&mut self, doc_id: DocId) -> Result<Option<u32>, Self::Error>;
@@ -60,6 +61,10 @@ impl RawSegmentRead for RawSegment<'_> {
 
     fn num_docs(&self) -> u32 {
         RawSegment::num_docs(self)
+    }
+
+    fn max_doc_id(&self) -> DocId {
+        RawSegment::meta(self).max_doc_id()
     }
 
     fn avg_doc_len(&self) -> f32 {
@@ -84,6 +89,10 @@ impl RawSegmentRead for RawSegmentFile {
 
     fn num_docs(&self) -> u32 {
         RawSegmentFile::num_docs(self)
+    }
+
+    fn max_doc_id(&self) -> DocId {
+        RawSegmentFile::meta(self).max_doc_id()
     }
 
     fn avg_doc_len(&self) -> f32 {
@@ -164,9 +173,12 @@ where
         }
     }
 
+    if let Some(slots) = dense_bm25_slots(segment.max_doc_id(), touched_upper_bound) {
+        return retrieve_bm25_raw_dense(segment, terms, slots, k, params);
+    }
+
     let mut scores = HashMap::with_capacity(touched_upper_bound.min(num_docs as usize));
     let mut doc_lengths = HashMap::with_capacity(touched_upper_bound.min(num_docs as usize));
-
     for term in terms {
         if term.idf == 0.0 {
             continue;
@@ -200,6 +212,75 @@ where
     }
 
     Ok(top_k_positive_scored_docs(scores, k))
+}
+
+fn retrieve_bm25_raw_dense<S>(
+    segment: &mut S,
+    terms: Vec<WeightedRawTerm>,
+    slots: usize,
+    k: usize,
+    params: Bm25Params,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<S::Error>>
+where
+    S: RawSegmentRead,
+{
+    let avg_doc_len = segment.avg_doc_len();
+    let mut scores = vec![0.0; slots];
+    let mut doc_lengths = vec![0u32; slots];
+    let mut seen = vec![false; slots];
+    let mut touched = Vec::new();
+
+    for term in terms {
+        if term.idf == 0.0 {
+            continue;
+        }
+        for (doc_id, tf) in segment
+            .postings(term.term_id)
+            .map_err(RawScoringError::Source)?
+        {
+            let slot = doc_id as usize;
+            if slot >= slots {
+                continue;
+            }
+            if !seen[slot] {
+                seen[slot] = true;
+                touched.push(doc_id);
+            }
+
+            let mut doc_length = doc_lengths[slot];
+            if doc_length == 0 {
+                doc_length = segment
+                    .document_len(doc_id)
+                    .map_err(RawScoringError::Source)?
+                    .unwrap_or(0);
+                doc_lengths[slot] = doc_length;
+            }
+            if doc_length == 0 {
+                continue;
+            }
+
+            let tf_score = bm25_tf_score(tf as f32, doc_length as f32, avg_doc_len, params);
+            let contribution = term.idf * tf_score;
+            if contribution != 0.0 {
+                scores[slot] += contribution * term.count as f32;
+            }
+        }
+    }
+
+    Ok(top_k_positive_scored_docs(
+        touched
+            .into_iter()
+            .map(|doc_id| (doc_id, scores[doc_id as usize])),
+        k,
+    ))
+}
+
+const DENSE_BM25_MAX_SLOTS: usize = 1_000_000;
+
+fn dense_bm25_slots(max_doc_id: DocId, touched_upper_bound: usize) -> Option<usize> {
+    let slots = usize::try_from(max_doc_id).ok()?.checked_add(1)?;
+    let useful_limit = touched_upper_bound.saturating_mul(2).max(4096);
+    (slots <= DENSE_BM25_MAX_SLOTS && slots <= useful_limit).then_some(slots)
 }
 
 #[derive(Debug)]

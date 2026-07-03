@@ -2,6 +2,8 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use lexir::bm25::{Bm25Params, InvertedIndex};
 use lexir::query_likelihood::{retrieve_query_likelihood, QueryLikelihoodParams};
 use lexir::tfidf::{retrieve_tfidf, TfIdfParams};
+#[cfg(feature = "raw-segment")]
+use postings::raw::{write_u64_u32_segment, RawDocument, RawSegmentFile, RawTermId};
 
 const N_DOCS: u32 = 20_000;
 const VOCAB_SIZE: usize = 5_000;
@@ -53,6 +55,30 @@ fn duplicate_query_terms(index: &InvertedIndex, unique: usize, repeat: usize) ->
     terms
 }
 
+#[cfg(feature = "raw-segment")]
+fn build_raw_docs() -> Vec<Vec<(RawTermId, u32)>> {
+    let mut docs = Vec::with_capacity(N_DOCS as usize);
+    let mut rng = 0xdeadbeef_cafebabe_u64;
+
+    for _ in 0..N_DOCS {
+        let mut terms = Vec::with_capacity(TERMS_PER_DOC);
+        for _ in 0..TERMS_PER_DOC {
+            terms.push((zipf_sample(&mut rng, VOCAB_SIZE) as RawTermId, 1));
+        }
+        docs.push(terms);
+    }
+
+    docs
+}
+
+#[cfg(feature = "raw-segment")]
+fn raw_query_terms(segment: &RawSegmentFile, count: usize, min_df: u32) -> Vec<RawTermId> {
+    (0..VOCAB_SIZE as RawTermId)
+        .filter(|&term| segment.df(term).unwrap() >= min_df)
+        .take(count)
+        .collect()
+}
+
 fn bench_bm25_retrieve(c: &mut Criterion) {
     let index = build_index();
     let params = Bm25Params::default();
@@ -85,6 +111,41 @@ fn bench_bm25_retrieve(c: &mut Criterion) {
             });
         },
     );
+
+    group.finish();
+}
+
+#[cfg(feature = "raw-segment")]
+fn bench_raw_bm25_retrieve(c: &mut Criterion) {
+    let raw_docs = build_raw_docs();
+    let docs: Vec<_> = raw_docs
+        .iter()
+        .enumerate()
+        .map(|(doc_id, terms)| RawDocument::new(doc_id as u32, terms))
+        .collect();
+    let bytes = write_u64_u32_segment(&docs).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), bytes).unwrap();
+    let mut segment = RawSegmentFile::open(file.path()).unwrap();
+    let params = Bm25Params::default();
+    let mut group = c.benchmark_group("raw_bm25_retrieve");
+
+    for n in [2usize, 8] {
+        let query = raw_query_terms(&segment, n, 20);
+        group.bench_with_input(BenchmarkId::new("file_terms", n), &query, |b, query| {
+            b.iter(|| {
+                black_box(
+                    lexir::raw::retrieve_bm25_raw_file(
+                        black_box(&mut segment),
+                        black_box(query.as_slice()),
+                        10,
+                        params,
+                    )
+                    .unwrap(),
+                );
+            });
+        });
+    }
 
     group.finish();
 }
@@ -167,6 +228,16 @@ fn bench_query_likelihood_retrieve(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(feature = "raw-segment")]
+criterion_group!(
+    benches,
+    bench_bm25_retrieve,
+    bench_raw_bm25_retrieve,
+    bench_tfidf_retrieve,
+    bench_query_likelihood_retrieve
+);
+
+#[cfg(not(feature = "raw-segment"))]
 criterion_group!(
     benches,
     bench_bm25_retrieve,

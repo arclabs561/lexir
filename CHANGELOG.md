@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Added a `raw_bm25_segment` example showing BM25 scoring over a file-backed
   `postings::raw::RawSegmentFile`.
+- Added raw-segment BM25 cases to the retrieval Criterion benchmark.
+
+### Changed
+- Changed raw-segment BM25 scoring to use dense score and document-length
+  accumulators for dense doc-id segments, while keeping the sparse HashMap path
+  for high-id sparse segments.
 
 ## [0.2.0] - 2026-07-02
 
