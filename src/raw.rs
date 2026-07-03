@@ -510,6 +510,10 @@ where
             touched_upper_bound = touched_upper_bound.saturating_add(df as usize);
         }
     }
+    terms.retain(|term| term.idf != 0.0);
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
 
     if let Some(slots) = dense_bm25_slots(segment.max_doc_id(), touched_upper_bound) {
         let dense_plan = DenseRawBm25Plan {
@@ -1285,6 +1289,76 @@ mod tests {
             assert_eq!(single_doc, dup_doc);
             assert!((dup_score - single_score * 2.0).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn raw_bm25_path_selection_ignores_absent_terms() {
+        #[derive(Default)]
+        struct PolicyReader {
+            postings_calls: usize,
+            streamed_calls: usize,
+        }
+
+        impl RawSegmentRead for PolicyReader {
+            type Error = std::convert::Infallible;
+
+            fn num_docs(&self) -> u32 {
+                100
+            }
+
+            fn max_doc_id(&self) -> DocId {
+                10
+            }
+
+            fn avg_doc_len(&self) -> f32 {
+                1.0
+            }
+
+            fn df(&mut self, term_id: RawTermId) -> Result<u32, Self::Error> {
+                Ok((term_id == 7) as u32)
+            }
+
+            fn document_len(&mut self, _doc_id: DocId) -> Result<Option<u32>, Self::Error> {
+                Ok(Some(1))
+            }
+
+            fn for_each_document_len(
+                &mut self,
+                _visit: impl FnMut(DocId, u32),
+            ) -> Result<(), Self::Error> {
+                Ok(())
+            }
+
+            fn postings(&mut self, term_id: RawTermId) -> Result<Vec<(DocId, u32)>, Self::Error> {
+                self.postings_calls += 1;
+                Ok((term_id == 7).then_some((3, 1)).into_iter().collect())
+            }
+
+            fn for_each_posting_with_document_len(
+                &mut self,
+                term_id: RawTermId,
+                mut visit: impl FnMut(DocId, u32, u32),
+            ) -> Result<(), Self::Error> {
+                self.streamed_calls += 1;
+                if term_id == 7 {
+                    visit(3, 1, 1);
+                }
+                Ok(())
+            }
+        }
+
+        let mut reader = PolicyReader::default();
+        let mut query = vec![7];
+        query.extend(1_000..1_064);
+        let stats = RawBm25CorpusStats::new(100, 1.0, [(7, 1)]);
+
+        let hits =
+            retrieve_bm25_raw_with_stats(&mut reader, &query, 1, Bm25Params::default(), &stats)
+                .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(reader.streamed_calls, 1);
+        assert_eq!(reader.postings_calls, 0);
     }
 
     #[test]

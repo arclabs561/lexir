@@ -245,6 +245,29 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
         },
     );
 
+    let mut one_present_many_absent_query = raw_query_terms(&segment, 1, 20);
+    one_present_many_absent_query.extend((VOCAB_SIZE as RawTermId)..(VOCAB_SIZE as RawTermId + 64));
+    group.bench_with_input(
+        BenchmarkId::new(
+            "file_one_present_many_absent",
+            one_present_many_absent_query.len(),
+        ),
+        &one_present_many_absent_query,
+        |b, query| {
+            b.iter(|| {
+                black_box(
+                    lexir::raw::retrieve_bm25_raw_file(
+                        black_box(&mut segment),
+                        black_box(query.as_slice()),
+                        10,
+                        params,
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+
     let dir = tempfile::tempdir().unwrap();
     let chunk_len = raw_docs.len().div_ceil(4);
     let mut multi_segments: Vec<_> = raw_docs

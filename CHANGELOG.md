@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   diagnostics.
 
 ### Changed
+- Changed raw BM25 path selection to ignore absent raw terms before choosing
+  between streaming postings and cached document-length scoring.
 - Changed file-backed raw BM25 broad-query scoring to prefill dense
   document-length caches from raw segment metadata instead of doing repeated
   per-document metadata lookups.
