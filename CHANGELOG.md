@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-02
+
 ### Changed
 - Changed `lexir index` and `lexir search` to stream corpus files line by
   line instead of reading the whole input file before indexing.
