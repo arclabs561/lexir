@@ -399,7 +399,7 @@ impl InvertedIndex {
     }
 }
 
-fn bm25_tf_score(tf: f32, doc_length: f32, avg_doc_len: f32, params: Bm25Params) -> f32 {
+pub(crate) fn bm25_tf_score(tf: f32, doc_length: f32, avg_doc_len: f32, params: Bm25Params) -> f32 {
     match params.variant {
         Bm25Variant::Standard => bm25_tf(tf, doc_length, avg_doc_len, params.k1, params.b),
         Bm25Variant::BM25L { delta } => {

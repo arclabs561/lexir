@@ -25,6 +25,8 @@ pub mod bm25;
 #[cfg(feature = "fuzzy")]
 pub mod fuzzy;
 pub mod query_likelihood;
+#[cfg(feature = "raw-segment")]
+pub mod raw;
 pub mod tfidf;
 
 pub use error::Error;

@@ -37,6 +37,7 @@ criterion = "0.5"
 default = ["persistence"]
 fuzzy = ["dep:gramdex"]
 persistence = ["dep:durability", "dep:serde", "postings/persistence"]
+raw-segment = ["postings/raw-segment"]
 recordlog = ["persistence", "dep:postcard"]
 cli = ["dep:clap", "recordlog"]
 
