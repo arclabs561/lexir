@@ -110,3 +110,7 @@ cargo run --features cli -- <subcommand>
 ```
 
 Subcommands: `index`, `search-index`, `search` for indexing and search. Record-log operations: `log-add`, `log-delete`, `log-search`, `log-checkpoint`, `log-compact`, `log-status`, `log-doctor`, `log-prune`, `log-scan`, `log-validate`, `log-serve`.
+
+## License
+
+MIT OR Apache-2.0
