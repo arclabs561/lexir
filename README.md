@@ -124,7 +124,9 @@ already be globally unique.
 
 `RawTermDictionary` is an in-process adapter from lexical terms to numeric raw
 term ids. `insert` assigns ids in insertion order; `from_terms_sorted` assigns
-ids from sorted unique terms for reproducible offline builds.
+ids from sorted unique terms for reproducible offline builds. Export
+`RawTermDictionary::terms` as a term-id-ordered sidecar and reload it with
+`RawTermDictionary::from_terms_in_id_order`.
 
 The caller owns commit lifecycle, deletes, dictionary persistence, and segment
 merge policy.

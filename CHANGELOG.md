@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `RawTermDictionary::from_terms_in_id_order` for reloading persisted
+  dictionary sidecars without re-sorting or silently accepting duplicate terms.
+
 ## [0.2.8] - 2026-07-04
 
 ### Changed

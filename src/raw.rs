@@ -27,6 +27,9 @@ pub enum RawTermDictionaryError {
     /// raw segment frequency type.
     #[error("raw term frequency overflow for term id {term_id}")]
     TermFrequencyOverflow { term_id: RawTermId },
+    /// A persisted raw term-id dictionary listed the same lexical term twice.
+    #[error("duplicate raw dictionary term at term id {term_id}")]
+    DuplicateTerm { term_id: RawTermId },
 }
 
 /// In-process mapping from lexical terms to `postings::raw` term ids.
@@ -69,6 +72,29 @@ impl RawTermDictionary {
             dictionary.insert(term);
         }
         dictionary
+    }
+
+    /// Create a dictionary from terms already ordered by raw term id.
+    ///
+    /// Use this when loading a persisted dictionary sidecar written from
+    /// [`RawTermDictionary::terms`]. Duplicate lexical terms are rejected so a
+    /// corrupt sidecar cannot silently shift term ids.
+    pub fn from_terms_in_id_order<I, T>(terms: I) -> Result<Self, RawTermDictionaryError>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+    {
+        let mut dictionary = Self::new();
+        for term in terms {
+            let term = term.as_ref();
+            if dictionary.ids.contains_key(term) {
+                return Err(RawTermDictionaryError::DuplicateTerm {
+                    term_id: dictionary.terms.len() as RawTermId,
+                });
+            }
+            dictionary.insert(term);
+        }
+        Ok(dictionary)
     }
 
     /// Number of terms in the dictionary.
@@ -2041,6 +2067,30 @@ mod tests {
             first.terms().collect::<Vec<_>>(),
             vec![(0, "alpha"), (1, "beta"), (2, "gamma"),]
         );
+    }
+
+    #[test]
+    fn raw_term_dictionary_loads_persisted_id_order() {
+        let mut original = RawTermDictionary::new();
+        original.insert("beta");
+        original.insert("alpha");
+        original.insert("gamma");
+        let persisted_terms: Vec<_> = original.terms().map(|(_, term)| term.to_owned()).collect();
+
+        let loaded = RawTermDictionary::from_terms_in_id_order(&persisted_terms).unwrap();
+
+        assert_eq!(loaded, original);
+        assert_eq!(loaded.id("beta"), Some(0));
+        assert_eq!(loaded.id("alpha"), Some(1));
+        assert_eq!(loaded.id("gamma"), Some(2));
+    }
+
+    #[test]
+    fn raw_term_dictionary_rejects_duplicate_persisted_terms() {
+        let err =
+            RawTermDictionary::from_terms_in_id_order(["alpha", "beta", "alpha"]).unwrap_err();
+
+        assert_eq!(err, RawTermDictionaryError::DuplicateTerm { term_id: 2 });
     }
 
     #[test]
