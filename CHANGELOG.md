@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-07-04
+
 ### Changed
 
 - Changed `retrieve_bm25_raw_files_and_index_with_stats` to score the live raw
