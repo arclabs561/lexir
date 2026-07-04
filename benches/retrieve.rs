@@ -10,6 +10,11 @@ use postings::raw::{
 const N_DOCS: u32 = 20_000;
 const VOCAB_SIZE: usize = 5_000;
 const TERMS_PER_DOC: usize = 80;
+const PARTITIONED_RAW_SEGMENTS: usize = 64;
+const PARTITIONED_RAW_DOCS_PER_SEGMENT: usize = 128;
+const PARTITIONED_RAW_VOCAB_PER_SEGMENT: usize = 512;
+const PARTITIONED_RAW_TERMS_PER_DOC: usize = 32;
+const PARTITIONED_RAW_QUERY_TERMS: usize = 8;
 
 fn zipf_sample(rng: &mut u64, vocab_size: usize) -> usize {
     *rng ^= *rng << 13;
@@ -125,6 +130,52 @@ fn build_prunable_raw_files() -> (
         ));
     }
 
+    let mut segment_refs: Vec<_> = segments.iter_mut().collect();
+    let stats = lexir::raw::RawBm25CorpusStats::from_raw_files(&mut segment_refs, &query).unwrap();
+    drop(segment_refs);
+
+    (dir, segments, stats, query)
+}
+
+#[cfg(feature = "raw-segment")]
+fn build_partitioned_raw_files() -> (
+    tempfile::TempDir,
+    Vec<RawSegmentFile>,
+    lexir::raw::RawBm25CorpusStats,
+    Vec<RawTermId>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut segments = Vec::new();
+
+    for segment_id in 0..PARTITIONED_RAW_SEGMENTS {
+        let term_base = (segment_id * PARTITIONED_RAW_VOCAB_PER_SEGMENT) as RawTermId;
+        let doc_base = (segment_id * PARTITIONED_RAW_DOCS_PER_SEGMENT) as u32;
+        let mut docs = Vec::with_capacity(PARTITIONED_RAW_DOCS_PER_SEGMENT);
+
+        for doc_offset in 0..PARTITIONED_RAW_DOCS_PER_SEGMENT {
+            let mut terms = std::collections::BTreeMap::new();
+            for term_offset in 0..PARTITIONED_RAW_TERMS_PER_DOC {
+                let local_term =
+                    (doc_offset * 37 + term_offset * 17) % PARTITIONED_RAW_VOCAB_PER_SEGMENT;
+                let tf = 1 + ((doc_offset + term_offset + segment_id) % 7) as u32;
+                *terms
+                    .entry(term_base + local_term as RawTermId)
+                    .or_insert(0) += tf;
+            }
+            docs.push(terms.into_iter().collect());
+        }
+
+        segments.push(write_raw_file(
+            &dir,
+            &format!("partitioned-{segment_id}.raw"),
+            &docs,
+            doc_base,
+        ));
+    }
+
+    let query: Vec<_> = (0..PARTITIONED_RAW_QUERY_TERMS)
+        .map(|term_offset| (term_offset * 17 % PARTITIONED_RAW_VOCAB_PER_SEGMENT) as RawTermId)
+        .collect();
     let mut segment_refs: Vec<_> = segments.iter_mut().collect();
     let stats = lexir::raw::RawBm25CorpusStats::from_raw_files(&mut segment_refs, &query).unwrap();
     drop(segment_refs);
@@ -417,6 +468,25 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
             });
         },
     );
+    group.bench_with_input(
+        BenchmarkId::new("files_terms_all_stats_64_search_stats", multi_query.len()),
+        &multi_query,
+        |b, query| {
+            let mut segments: Vec<_> = multi_segments_64.iter_mut().collect();
+            b.iter(|| {
+                black_box(
+                    lexir::raw::retrieve_bm25_raw_files_with_search_stats(
+                        black_box(segments.as_mut_slice()),
+                        black_box(query.as_slice()),
+                        10,
+                        params,
+                        black_box(&all_term_stats_64),
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
 
     let (_prunable_dir, mut prunable_segments, prunable_stats, prunable_query) =
         build_prunable_raw_files();
@@ -447,6 +517,38 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
                 params,
                 black_box(&exact_stats),
             ));
+        });
+    });
+
+    let (_partitioned_dir, mut partitioned_segments, partitioned_stats, partitioned_query) =
+        build_partitioned_raw_files();
+    {
+        let mut segments: Vec<_> = partitioned_segments.iter_mut().collect();
+        let result = lexir::raw::retrieve_bm25_raw_files_with_search_stats(
+            &mut segments,
+            &partitioned_query,
+            10,
+            params,
+            &partitioned_stats,
+        )
+        .unwrap();
+        assert_eq!(result.stats.segments_seen, PARTITIONED_RAW_SEGMENTS);
+        assert_eq!(result.stats.segments_scored, 1);
+        assert_eq!(result.stats.segments_pruned, PARTITIONED_RAW_SEGMENTS - 1);
+    }
+    group.bench_function("files_partitioned_search_stats_64", |b| {
+        let mut segments: Vec<_> = partitioned_segments.iter_mut().collect();
+        b.iter(|| {
+            black_box(
+                lexir::raw::retrieve_bm25_raw_files_with_search_stats(
+                    black_box(segments.as_mut_slice()),
+                    black_box(partitioned_query.as_slice()),
+                    10,
+                    params,
+                    black_box(&partitioned_stats),
+                )
+                .unwrap(),
+            );
         });
     });
 

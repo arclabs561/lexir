@@ -2286,6 +2286,48 @@ mod tests {
     }
 
     #[test]
+    fn raw_bm25_files_prune_disjoint_vocab_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut all_docs = Vec::new();
+        let mut opened = Vec::new();
+
+        for segment_index in 0..4 {
+            let term_base = (segment_index * 100) as RawTermId;
+            let doc_base = (segment_index * 10) as DocId;
+            let docs = vec![
+                (doc_base, vec![(term_base, 10), (term_base + 1, 1)]),
+                (doc_base + 1, vec![(term_base, 5)]),
+            ];
+            all_docs.extend(docs.iter().cloned());
+
+            let path = dir.path().join(format!("segment-{segment_index}.raw"));
+            std::fs::write(&path, build_raw_bytes_with_doc_ids(&docs)).unwrap();
+            opened.push(RawSegmentFile::open(&path).unwrap());
+        }
+
+        let index = build_memory_index_with_doc_ids(&all_docs);
+        let params = Bm25Params::default();
+        let query = vec![0, 1];
+        let expected = raw_bm25_memory_hits(&index, &query, 2, params);
+
+        let mut segments: Vec<_> = opened.iter_mut().collect();
+        let stats = RawBm25CorpusStats::from_raw_files(&mut segments, &query).unwrap();
+        let result =
+            retrieve_bm25_raw_files_with_search_stats(&mut segments, &query, 2, params, &stats)
+                .unwrap();
+
+        assert_hits_close(&expected, &result.hits, "disjoint-vocab raw BM25");
+        assert_eq!(
+            result.stats,
+            RawBm25SearchStats {
+                segments_seen: 4,
+                segments_scored: 1,
+                segments_pruned: 3,
+            }
+        );
+    }
+
+    #[test]
     fn raw_bm25_files_require_stats_before_pruning_present_terms() {
         let first = vec![(10, vec![(7, 100)])];
         let second = vec![(1, vec![(8, 1)])];
