@@ -2,15 +2,158 @@
 //!
 //! This is the out-of-core lexical path: callers keep their own term-id mapping
 //! and use `postings` raw segments for storage, while `lexir` supplies BM25
-//! scoring and deterministic top-k ranking.
+//! scoring and deterministic top-k ranking. `RawTermDictionary` is the optional
+//! in-process adapter from lexical terms to raw numeric term ids; it does not
+//! own persistence, commits, deletes, or segment merges.
 
 use crate::bm25::{bm25_tf_score, Bm25Params, Bm25Variant};
 use crate::ranking::top_k_positive_scored_docs;
 use postings::raw::{RawSegment, RawSegmentFile, RawSegmentFileError, RawTermId};
 use postings::DocId;
 use rankfns::bm25_idf_plus1;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
+
+/// Errors returned when encoding lexical terms into raw term ids.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum RawTermDictionaryError {
+    /// A single document contains more occurrences of a term than fit in the
+    /// raw segment frequency type.
+    #[error("raw term frequency overflow for term id {term_id}")]
+    TermFrequencyOverflow { term_id: RawTermId },
+}
+
+/// In-process mapping from lexical terms to `postings::raw` term ids.
+///
+/// Raw postings segments store numeric term ids. This helper gives callers a
+/// focused lexicon boundary for examples, tests, and build pipelines that do
+/// not already have their own term dictionary. Ids assigned by `insert` follow
+/// insertion order; use `from_terms_sorted` when corpus-order-independent ids
+/// matter.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RawTermDictionary {
+    terms: Vec<Arc<str>>,
+    ids: HashMap<Arc<str>, RawTermId>,
+}
+
+impl RawTermDictionary {
+    /// Create an empty term dictionary.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a dictionary whose ids follow sorted unique term order.
+    ///
+    /// This is the reproducible-build constructor: the same set of terms gets
+    /// the same ids regardless of corpus traversal order.
+    pub fn from_terms_sorted<I, T>(terms: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+    {
+        let mut terms: Vec<String> = terms
+            .into_iter()
+            .map(|term| term.as_ref().to_owned())
+            .collect();
+        terms.sort_unstable();
+        terms.dedup();
+
+        let mut dictionary = Self::new();
+        for term in terms {
+            dictionary.insert(term);
+        }
+        dictionary
+    }
+
+    /// Number of terms in the dictionary.
+    pub fn len(&self) -> usize {
+        self.terms.len()
+    }
+
+    /// Return true when the dictionary has no terms.
+    pub fn is_empty(&self) -> bool {
+        self.terms.is_empty()
+    }
+
+    /// Insert a term if absent and return its raw term id.
+    ///
+    /// New ids follow insertion order.
+    pub fn insert(&mut self, term: impl AsRef<str>) -> RawTermId {
+        let term = term.as_ref();
+        if let Some(&term_id) = self.ids.get(term) {
+            return term_id;
+        }
+
+        let term_id = self.terms.len() as RawTermId;
+        let term: Arc<str> = Arc::from(term);
+        self.terms.push(Arc::clone(&term));
+        self.ids.insert(term, term_id);
+        term_id
+    }
+
+    /// Return the raw term id for a lexical term.
+    pub fn id(&self, term: &str) -> Option<RawTermId> {
+        self.ids.get(term).copied()
+    }
+
+    /// Return the lexical term for a raw term id.
+    pub fn term(&self, term_id: RawTermId) -> Option<&str> {
+        usize::try_from(term_id)
+            .ok()
+            .and_then(|index| self.terms.get(index))
+            .map(AsRef::as_ref)
+    }
+
+    /// Iterate terms in raw term-id order.
+    pub fn terms(&self) -> impl Iterator<Item = (RawTermId, &str)> + '_ {
+        self.terms
+            .iter()
+            .enumerate()
+            .map(|(term_id, term)| (term_id as RawTermId, term.as_ref()))
+    }
+
+    /// Encode a document as sorted `(raw_term_id, term_frequency)` pairs.
+    ///
+    /// Unknown terms are inserted. Duplicate terms are counted. The returned
+    /// vector is sorted by raw term id, which matches the raw segment writer's
+    /// preferred document shape.
+    pub fn encode_document<I, T>(
+        &mut self,
+        terms: I,
+    ) -> Result<Vec<(RawTermId, u32)>, RawTermDictionaryError>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+    {
+        let mut counts = BTreeMap::new();
+        for term in terms {
+            let term_id = self.insert(term);
+            let count = counts.entry(term_id).or_insert(0u32);
+            *count = count
+                .checked_add(1)
+                .ok_or(RawTermDictionaryError::TermFrequencyOverflow { term_id })?;
+        }
+        Ok(counts.into_iter().collect())
+    }
+
+    /// Encode a query as raw term ids.
+    ///
+    /// Unknown terms are omitted. Duplicate known terms are preserved so BM25
+    /// scoring keeps the caller's query-term multiplicity.
+    pub fn encode_query<I, T>(&self, terms: I) -> Vec<RawTermId>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+    {
+        terms
+            .into_iter()
+            .filter_map(|term| self.id(term.as_ref()))
+            .collect()
+    }
+}
 
 /// Errors returned by raw-segment lexical scoring.
 #[derive(Debug)]
@@ -973,6 +1116,83 @@ mod tests {
         *state ^= *state >> 7;
         *state ^= *state << 17;
         *state
+    }
+
+    #[test]
+    fn raw_term_dictionary_assigns_stable_insertion_ids() {
+        let mut dictionary = RawTermDictionary::new();
+
+        let search = dictionary.insert("search");
+        let rust = dictionary.insert("rust");
+        let duplicate = dictionary.insert(String::from("search"));
+
+        assert_eq!(search, 0);
+        assert_eq!(rust, 1);
+        assert_eq!(duplicate, search);
+        assert_eq!(dictionary.id("search"), Some(search));
+        assert_eq!(dictionary.id("missing"), None);
+        assert_eq!(dictionary.term(search), Some("search"));
+        assert_eq!(dictionary.term(99), None);
+        assert_eq!(
+            dictionary.terms().collect::<Vec<_>>(),
+            vec![(search, "search"), (rust, "rust")]
+        );
+    }
+
+    #[test]
+    fn raw_term_dictionary_sorted_constructor_is_order_independent() {
+        let first = RawTermDictionary::from_terms_sorted(["beta", "alpha", "beta", "gamma"]);
+        let second = RawTermDictionary::from_terms_sorted(["gamma", "beta", "alpha"]);
+
+        assert_eq!(first, second);
+        assert_eq!(first.id("alpha"), Some(0));
+        assert_eq!(first.id("beta"), Some(1));
+        assert_eq!(first.id("gamma"), Some(2));
+        assert_eq!(
+            first.terms().collect::<Vec<_>>(),
+            vec![(0, "alpha"), (1, "beta"), (2, "gamma"),]
+        );
+    }
+
+    #[test]
+    fn raw_term_dictionary_encodes_documents_and_queries() {
+        let mut dictionary = RawTermDictionary::from_terms_sorted(["rust", "search"]);
+
+        let document = dictionary
+            .encode_document(["rust", "search", "rust", "new"])
+            .unwrap();
+        let query = dictionary.encode_query(["missing", "search", "search", "rust"]);
+
+        assert_eq!(dictionary.id("rust"), Some(0));
+        assert_eq!(dictionary.id("search"), Some(1));
+        assert_eq!(dictionary.id("new"), Some(2));
+        assert_eq!(document, vec![(0, 2), (1, 1), (2, 1)]);
+        assert_eq!(query, vec![1, 1, 0]);
+    }
+
+    #[test]
+    fn raw_term_dictionary_feeds_raw_bm25_segment() {
+        let mut dictionary = RawTermDictionary::new();
+        let encoded_docs = [
+            dictionary
+                .encode_document(["rust", "search", "search"])
+                .unwrap(),
+            dictionary.encode_document(["rust"]).unwrap(),
+            dictionary.encode_document(["other"]).unwrap(),
+        ];
+        let raw_docs: Vec<_> = encoded_docs
+            .iter()
+            .enumerate()
+            .map(|(doc_id, terms)| RawDocument::new(doc_id as DocId, terms))
+            .collect();
+        let bytes = write_u64_u32_segment(&raw_docs).unwrap();
+        let segment = RawSegment::open(&bytes).unwrap();
+
+        let query = dictionary.encode_query(["search", "missing", "search"]);
+        assert_eq!(query, vec![dictionary.id("search").unwrap(); 2]);
+
+        let hits = retrieve_bm25_raw_segment(&segment, &query, 3, Bm25Params::default()).unwrap();
+        assert_eq!(hits.first().map(|(doc_id, _)| *doc_id), Some(0));
     }
 
     #[test]

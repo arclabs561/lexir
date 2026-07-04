@@ -113,8 +113,12 @@ segment counts for profiling. `RawBm25CorpusStats::from_raw_files_all_terms`
 builds reusable stats for all terms in a raw segment generation without reading
 postings payloads. Segment document ids must already be globally unique.
 
-The caller owns the lexicon, commit lifecycle, deletes, and segment merge
-policy.
+`RawTermDictionary` is an in-process adapter from lexical terms to numeric raw
+term ids. `insert` assigns ids in insertion order; `from_terms_sorted` assigns
+ids from sorted unique terms for reproducible offline builds.
+
+The caller owns commit lifecycle, deletes, dictionary persistence, and segment
+merge policy.
 
 ## Features
 
