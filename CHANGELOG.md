@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added a `raw_bm25_generation` example showing streaming lexical ingestion
+  into raw files plus one live shard, with a persisted term-id dictionary
+  sidecar.
+
 ## [0.2.9] - 2026-07-04
 
 ### Added

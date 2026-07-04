@@ -57,3 +57,7 @@ required-features = ["raw-segment"]
 [[example]]
 name = "raw_bm25_benefits"
 required-features = ["raw-segment"]
+
+[[example]]
+name = "raw_bm25_generation"
+required-features = ["raw-segment"]
