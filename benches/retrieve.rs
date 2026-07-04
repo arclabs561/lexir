@@ -211,11 +211,11 @@ fn build_seeded_block_prunable_raw_files() -> (
 
     let dir = tempfile::tempdir().unwrap();
     let query = vec![QUERY_TERM];
-    let first_docs = vec![vec![(QUERY_TERM, 1_000)]; 10];
+    let first_docs = vec![vec![(QUERY_TERM, 1_000), (999, 9_000)]; 10];
     let second_docs: Vec<_> = (0..COLD_DOCS)
         .map(|doc_id| {
             if doc_id >= COLD_DOCS - HOT_TAIL_DOCS {
-                vec![(QUERY_TERM, 10_000)]
+                vec![(QUERY_TERM, 900)]
             } else {
                 vec![(QUERY_TERM, 1)]
             }

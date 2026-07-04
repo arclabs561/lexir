@@ -248,6 +248,25 @@ pub struct RawBm25SearchStats {
     pub segments_pruned: usize,
 }
 
+/// Search diagnostics for a multi-file raw BM25 search.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RawBm25SearchDiagnostics {
+    /// Segment pruning diagnostics for the searched raw segment files.
+    pub segments: RawBm25SearchStats,
+    /// Sum of unique query terms scored across raw files that were searched.
+    pub terms_scored: usize,
+    /// Sum of per-file posting upper bounds for scored terms.
+    pub touched_postings_upper_bound: usize,
+    /// Sum of dense accumulator slots allocated by dense file paths.
+    pub dense_slots: usize,
+    /// Sum of per-term posting blocks considered by block-pruned file paths.
+    pub term_blocks_seen: usize,
+    /// Sum of per-term posting blocks decoded by block-pruned file paths.
+    pub term_blocks_scored: usize,
+    /// Sum of per-term posting blocks skipped by block-pruned file paths.
+    pub term_blocks_pruned: usize,
+}
+
 /// Hits and segment-level diagnostics from a multi-file raw BM25 search.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RawBm25SearchResult {
@@ -255,6 +274,26 @@ pub struct RawBm25SearchResult {
     pub hits: Vec<(DocId, f32)>,
     /// Segment-pruning diagnostics for the search.
     pub stats: RawBm25SearchStats,
+}
+
+/// Hits and search diagnostics from a multi-file raw BM25 search.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RawBm25DiagnosticSearchResult {
+    /// Top-k hits sorted by descending BM25 score, then document id.
+    pub hits: Vec<(DocId, f32)>,
+    /// Segment and file traversal diagnostics for the search.
+    pub diagnostics: RawBm25SearchDiagnostics,
+}
+
+impl RawBm25SearchDiagnostics {
+    fn add_file_stats(&mut self, stats: RawBm25FileSearchStats) {
+        self.terms_scored += stats.terms_scored;
+        self.touched_postings_upper_bound += stats.touched_postings_upper_bound;
+        self.dense_slots += stats.dense_slots;
+        self.term_blocks_seen += stats.term_blocks_seen;
+        self.term_blocks_scored += stats.term_blocks_scored;
+        self.term_blocks_pruned += stats.term_blocks_pruned;
+    }
 }
 
 /// File-backed raw BM25 traversal path used for a single segment search.
@@ -790,17 +829,15 @@ fn retrieve_bm25_raw_file_with_stats_min_score(
     stats: &RawBm25CorpusStats,
     min_score: Option<f32>,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
-    if let Some(hits) = retrieve_bm25_raw_file_with_stats_pruned_block_hits(
+    retrieve_bm25_raw_file_with_search_stats_min_score(
         segment,
         query_terms,
         k,
         params,
         stats,
         min_score,
-    )? {
-        return Ok(hits);
-    }
-    retrieve_bm25_raw_with_stats(segment, query_terms, k, params, stats)
+    )
+    .map(|result| result.hits)
 }
 
 /// Retrieve top-k documents using BM25 over a file-backed raw segment and
@@ -812,13 +849,24 @@ pub fn retrieve_bm25_raw_file_with_search_stats(
     params: Bm25Params,
     stats: &RawBm25CorpusStats,
 ) -> Result<RawBm25FileSearchResult, RawScoringError<RawSegmentFileError>> {
+    retrieve_bm25_raw_file_with_search_stats_min_score(segment, query_terms, k, params, stats, None)
+}
+
+fn retrieve_bm25_raw_file_with_search_stats_min_score(
+    segment: &mut RawSegmentFile,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+    min_score: Option<f32>,
+) -> Result<RawBm25FileSearchResult, RawScoringError<RawSegmentFileError>> {
     if let Some(result) = retrieve_bm25_raw_file_with_stats_pruned_blocks(
         segment,
         query_terms,
         k,
         params,
         stats,
-        None,
+        min_score,
     )? {
         return Ok(result);
     }
@@ -853,7 +901,7 @@ pub fn retrieve_bm25_raw_files_with_stats(
     params: Bm25Params,
     stats: &RawBm25CorpusStats,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
-    retrieve_bm25_raw_files_with_search_stats_seeded(
+    retrieve_bm25_raw_files_with_diagnostics_seeded(
         segments,
         query_terms,
         k,
@@ -907,7 +955,7 @@ pub fn retrieve_bm25_raw_files_and_index_with_stats(
         live_hits = retrieve_bm25_raw_with_stats(&mut live_reader, query_terms, k, params, stats)
             .map_err(raw_infallible_error)?;
     }
-    retrieve_bm25_raw_files_with_search_stats_seeded(
+    retrieve_bm25_raw_files_with_diagnostics_seeded(
         segments,
         query_terms,
         k,
@@ -916,6 +964,38 @@ pub fn retrieve_bm25_raw_files_and_index_with_stats(
         live_hits,
     )
     .map(|result| result.hits)
+}
+
+/// Retrieve top-k documents across sealed raw segment files plus one live
+/// in-memory raw postings shard and return segment and file-traversal
+/// diagnostics for the sealed-file side.
+///
+/// Raw segment document ids and live-shard document ids must already be
+/// globally unique among live documents. Passing shared corpus stats keeps
+/// BM25 IDF and length normalization consistent across sealed files and the
+/// live shard.
+pub fn retrieve_bm25_raw_files_and_index_with_diagnostics(
+    segments: &mut [&mut RawSegmentFile],
+    live_index: &PostingsIndex<RawTermId, u32>,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<RawBm25DiagnosticSearchResult, RawScoringError<RawSegmentFileError>> {
+    let mut live_hits = Vec::new();
+    if live_index.num_docs() > 0 && k > 0 {
+        let mut live_reader = live_index;
+        live_hits = retrieve_bm25_raw_with_stats(&mut live_reader, query_terms, k, params, stats)
+            .map_err(raw_infallible_error)?;
+    }
+    retrieve_bm25_raw_files_with_diagnostics_seeded(
+        segments,
+        query_terms,
+        k,
+        params,
+        stats,
+        live_hits,
+    )
 }
 
 /// Retrieve top-k documents across file-backed raw segments and return
@@ -931,7 +1011,27 @@ pub fn retrieve_bm25_raw_files_with_search_stats(
     params: Bm25Params,
     stats: &RawBm25CorpusStats,
 ) -> Result<RawBm25SearchResult, RawScoringError<RawSegmentFileError>> {
-    retrieve_bm25_raw_files_with_search_stats_seeded(
+    let result = retrieve_bm25_raw_files_with_diagnostics(segments, query_terms, k, params, stats)?;
+    Ok(RawBm25SearchResult {
+        hits: result.hits,
+        stats: result.diagnostics.segments,
+    })
+}
+
+/// Retrieve top-k documents across file-backed raw segments and return
+/// segment and file-traversal diagnostics for the search.
+///
+/// Segment document ids must already be globally unique. Passing shared corpus
+/// stats keeps BM25 IDF and length normalization consistent across all
+/// immutable segments.
+pub fn retrieve_bm25_raw_files_with_diagnostics(
+    segments: &mut [&mut RawSegmentFile],
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<RawBm25DiagnosticSearchResult, RawScoringError<RawSegmentFileError>> {
+    retrieve_bm25_raw_files_with_diagnostics_seeded(
         segments,
         query_terms,
         k,
@@ -941,36 +1041,39 @@ pub fn retrieve_bm25_raw_files_with_search_stats(
     )
 }
 
-fn retrieve_bm25_raw_files_with_search_stats_seeded(
+fn retrieve_bm25_raw_files_with_diagnostics_seeded(
     segments: &mut [&mut RawSegmentFile],
     query_terms: &[RawTermId],
     k: usize,
     params: Bm25Params,
     stats: &RawBm25CorpusStats,
     mut candidates: Vec<(DocId, f32)>,
-) -> Result<RawBm25SearchResult, RawScoringError<RawSegmentFileError>> {
+) -> Result<RawBm25DiagnosticSearchResult, RawScoringError<RawSegmentFileError>> {
     if query_terms.is_empty() {
         return Err(RawScoringError::EmptyQuery);
     }
     if stats.num_docs() == 0 {
         return Err(RawScoringError::EmptyIndex);
     }
-    let mut search_stats = RawBm25SearchStats {
-        segments_seen: segments.len(),
-        ..RawBm25SearchStats::default()
+    let mut diagnostics = RawBm25SearchDiagnostics {
+        segments: RawBm25SearchStats {
+            segments_seen: segments.len(),
+            ..RawBm25SearchStats::default()
+        },
+        ..RawBm25SearchDiagnostics::default()
     };
     if k == 0 {
-        return Ok(RawBm25SearchResult {
+        return Ok(RawBm25DiagnosticSearchResult {
             hits: Vec::new(),
-            stats: search_stats,
+            diagnostics,
         });
     }
 
     let avg_doc_len = stats.avg_doc_len();
     if avg_doc_len <= 0.0 || !avg_doc_len.is_finite() {
-        return Ok(RawBm25SearchResult {
+        return Ok(RawBm25DiagnosticSearchResult {
             hits: Vec::new(),
-            stats: search_stats,
+            diagnostics,
         });
     }
 
@@ -1003,7 +1106,7 @@ fn retrieve_bm25_raw_files_with_search_stats_seeded(
         if upper_bound > 0.0 || !upper_bound.is_finite() {
             order.push((index, upper_bound));
         } else {
-            search_stats.segments_pruned += 1;
+            diagnostics.segments.segments_pruned += 1;
         }
     }
     order.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
@@ -1015,28 +1118,30 @@ fn retrieve_bm25_raw_files_with_search_stats_seeded(
     };
     for (index, upper_bound) in order {
         if candidates.len() >= k && upper_bound < threshold {
-            search_stats.segments_pruned += 1;
+            diagnostics.segments.segments_pruned += 1;
             continue;
         }
-        search_stats.segments_scored += 1;
+        diagnostics.segments.segments_scored += 1;
         let min_score = (candidates.len() >= k).then_some(threshold);
-        candidates.extend(retrieve_bm25_raw_file_with_stats_min_score(
+        let result = retrieve_bm25_raw_file_with_search_stats_min_score(
             segments[index],
             query_terms,
             k,
             params,
             stats,
             min_score,
-        )?);
+        )?;
+        diagnostics.add_file_stats(result.stats);
+        candidates.extend(result.hits);
         if candidates.len() >= k {
             candidates = top_k_positive_scored_docs(candidates, k);
             threshold = candidates.last().map_or(0.0, |(_, score)| *score);
         }
     }
 
-    Ok(RawBm25SearchResult {
+    Ok(RawBm25DiagnosticSearchResult {
         hits: top_k_positive_scored_docs(candidates, k),
-        stats: search_stats,
+        diagnostics,
     })
 }
 
@@ -1299,56 +1404,6 @@ fn prepare_raw_bm25_pruned_block_search(
     }
 
     Ok(RawBm25PrunedBlockSearch::Search { plan, avg_doc_len })
-}
-
-fn retrieve_bm25_raw_file_with_stats_pruned_block_hits(
-    segment: &mut RawSegmentFile,
-    query_terms: &[RawTermId],
-    k: usize,
-    params: Bm25Params,
-    stats: &RawBm25CorpusStats,
-    min_score: Option<f32>,
-) -> Result<Option<Vec<(DocId, f32)>>, RawScoringError<RawSegmentFileError>> {
-    let (plan, avg_doc_len) =
-        match prepare_raw_bm25_pruned_block_search(segment, query_terms, k, params, stats)? {
-            RawBm25PrunedBlockSearch::Disabled => return Ok(None),
-            RawBm25PrunedBlockSearch::Empty => return Ok(Some(Vec::new())),
-            RawBm25PrunedBlockSearch::Search { plan, avg_doc_len } => (plan, avg_doc_len),
-        };
-
-    if let Some((doc_base, slots)) =
-        dense_bm25_range(segment, plan.touched_upper_bound).map_err(RawScoringError::Source)?
-    {
-        let context = RawBm25BlockPruneContext {
-            k,
-            params,
-            avg_doc_len,
-            min_score,
-        };
-        return retrieve_bm25_raw_file_pruned_blocks_dense(
-            segment,
-            &plan.terms,
-            (doc_base, slots),
-            context,
-            None,
-        )
-        .map(Some);
-    }
-
-    let context = RawBm25BlockPruneContext {
-        k,
-        params,
-        avg_doc_len,
-        min_score,
-    };
-    retrieve_bm25_raw_file_pruned_blocks_sparse(
-        segment,
-        &plan.terms,
-        plan.touched_upper_bound.min(stats.num_docs() as usize),
-        context,
-        None,
-    )
-    .map(Some)
 }
 
 fn retrieve_bm25_raw_file_with_stats_pruned_blocks(
@@ -2548,6 +2603,86 @@ mod tests {
         assert!(
             seeded.stats.term_blocks_pruned > unseeded.stats.term_blocks_pruned,
             "seeded floor should skip low-bound blocks before local top-k fills"
+        );
+    }
+
+    #[test]
+    fn raw_bm25_files_diagnostics_report_seeded_block_pruning() {
+        const TERM: RawTermId = 10;
+        const FILLER: RawTermId = 999;
+        const TAIL_DOCS: u32 = 128;
+        const SECOND_DOCS: u32 = 4096;
+
+        let first: Vec<_> = (0..10)
+            .map(|doc_id| (doc_id, vec![(TERM, 1_000), (FILLER, 9_000)]))
+            .collect();
+        let second: Vec<_> = (0..SECOND_DOCS)
+            .map(|doc_offset| {
+                let tf = if doc_offset >= SECOND_DOCS - TAIL_DOCS {
+                    900
+                } else {
+                    1
+                };
+                (10_000 + doc_offset, vec![(TERM, tf)])
+            })
+            .collect();
+        let mut index = InvertedIndex::new();
+        for (doc_id, terms) in first.iter().chain(second.iter()) {
+            add_raw_doc_to_memory_index(&mut index, *doc_id, terms);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let first_path = dir.path().join("first.raw");
+        let second_path = dir.path().join("second.raw");
+        std::fs::write(&first_path, build_raw_bytes_with_doc_ids(&first)).unwrap();
+        std::fs::write(&second_path, build_raw_bytes_with_doc_ids(&second)).unwrap();
+        let mut first_segment = RawSegmentFile::open(&first_path).unwrap();
+        let mut second_segment = RawSegmentFile::open(&second_path).unwrap();
+        let query = vec![TERM];
+        let params = Bm25Params::default();
+        let stats = {
+            let mut segments = [&mut first_segment, &mut second_segment];
+            RawBm25CorpusStats::from_raw_files(&mut segments, &query).unwrap()
+        };
+
+        let expected = raw_bm25_memory_hits(&index, &query, 10, params);
+        let unseeded_pruned = retrieve_bm25_raw_file_with_search_stats(
+            &mut first_segment,
+            &query,
+            10,
+            params,
+            &stats,
+        )
+        .unwrap()
+        .stats
+        .term_blocks_pruned
+            + retrieve_bm25_raw_file_with_search_stats(
+                &mut second_segment,
+                &query,
+                10,
+                params,
+                &stats,
+            )
+            .unwrap()
+            .stats
+            .term_blocks_pruned;
+
+        let mut segments = [&mut first_segment, &mut second_segment];
+        let result =
+            retrieve_bm25_raw_files_with_diagnostics(&mut segments, &query, 10, params, &stats)
+                .unwrap();
+
+        assert_hits_close(&expected, &result.hits, "diagnostic multi-file BM25");
+        assert_eq!(result.diagnostics.segments.segments_seen, 2);
+        assert_eq!(result.diagnostics.segments.segments_scored, 2);
+        assert_eq!(result.diagnostics.segments.segments_pruned, 0);
+        assert!(
+            result.diagnostics.term_blocks_pruned > unseeded_pruned,
+            "multi-file diagnostics should expose extra seeded block pruning"
+        );
+        assert_eq!(
+            result.diagnostics.term_blocks_seen,
+            result.diagnostics.term_blocks_scored + result.diagnostics.term_blocks_pruned
         );
     }
 

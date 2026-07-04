@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added `RawTermDictionary::from_terms_in_id_order` for reloading persisted
   dictionary sidecars without re-sorting or silently accepting duplicate terms.
+- Added `retrieve_bm25_raw_files_with_diagnostics`,
+  `retrieve_bm25_raw_files_and_index_with_diagnostics`, and a
+  `raw_bm25_benefits` example for measuring segment and block-pruning counters
+  alongside rough timing controls.
 
 ### Changed
 
