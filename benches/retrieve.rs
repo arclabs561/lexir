@@ -10,10 +10,15 @@ use postings::raw::{
 const N_DOCS: u32 = 20_000;
 const VOCAB_SIZE: usize = 5_000;
 const TERMS_PER_DOC: usize = 80;
+#[cfg(feature = "raw-segment")]
 const PARTITIONED_RAW_SEGMENTS: usize = 64;
+#[cfg(feature = "raw-segment")]
 const PARTITIONED_RAW_DOCS_PER_SEGMENT: usize = 128;
+#[cfg(feature = "raw-segment")]
 const PARTITIONED_RAW_VOCAB_PER_SEGMENT: usize = 512;
+#[cfg(feature = "raw-segment")]
 const PARTITIONED_RAW_TERMS_PER_DOC: usize = 32;
+#[cfg(feature = "raw-segment")]
 const PARTITIONED_RAW_QUERY_TERMS: usize = 8;
 
 fn zipf_sample(rng: &mut u64, vocab_size: usize) -> usize {
