@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Criterion coverage for filtered raw BM25 stats construction and
   file-backed filtered scoring.
 
+### Changed
+
+- Bumped the `postings` dependency to 0.2.12.
+
 ## [0.2.9] - 2026-07-04
 
 ### Added
