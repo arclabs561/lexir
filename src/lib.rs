@@ -3,6 +3,8 @@
 //! Lexical retrieval built on `postings`:
 //! - `postings` provides postings lists + candidate planning (no false negatives).
 //! - `lexir` provides **scoring + ranking** (BM25 / TF-IDF) over `postings`.
+//! - Exact filters, such as phrase/proximity matches, can supply candidate docs
+//!   for `lexir` to rank while keeping their storage and execution elsewhere.
 //!
 //! Scope:
 //! - In-memory indexes
@@ -11,8 +13,8 @@
 //!
 //! Non-goals:
 //! - Storing document content (index-only)
-//! - Phrase queries / positional postings
-//! - Query language beyond “bag of terms”
+//! - Owning positional storage or phrase/proximity execution (that lives in `postings`)
+//! - Query language beyond "bag of terms"
 //!
 //! References:
 //! - Robertson & Walker (1994): probabilistic retrieval foundations

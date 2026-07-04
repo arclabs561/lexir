@@ -397,6 +397,40 @@ impl InvertedIndex {
 
         Ok(top_k_positive_scored_docs(scores, k))
     }
+
+    /// Rank caller-supplied candidate documents using BM25.
+    ///
+    /// This is the composition point for exact filters that live outside
+    /// `lexir`, such as phrase/proximity matches from positional postings.
+    /// Candidate ids are treated as a set: duplicates and unknown documents do
+    /// not produce duplicate hits.
+    pub fn retrieve_candidates(
+        &self,
+        query_terms: &[String],
+        candidate_docs: &[u32],
+        k: usize,
+        params: Bm25Params,
+    ) -> Result<Vec<(u32, f32)>, Error> {
+        if query_terms.is_empty() {
+            return Err(Error::EmptyQuery);
+        }
+        if self.num_docs() == 0 {
+            return Err(Error::EmptyIndex);
+        }
+        if k == 0 || candidate_docs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut docs = candidate_docs.to_vec();
+        docs.sort_unstable();
+        docs.dedup();
+
+        Ok(top_k_positive_scored_docs(
+            docs.into_iter()
+                .map(|doc_id| (doc_id, self.score(doc_id, query_terms, params))),
+            k,
+        ))
+    }
 }
 
 pub(crate) fn bm25_tf_score(tf: f32, doc_length: f32, avg_doc_len: f32, params: Bm25Params) -> f32 {
@@ -523,6 +557,54 @@ mod tests {
                 "doc {doc_id}: retrieve={score}, point_score={expected}"
             );
         }
+    }
+
+    #[test]
+    fn retrieve_candidates_ranks_only_supplied_docs() {
+        let mut ix = InvertedIndex::new();
+        ix.add_document(1, &["quick".into(), "brown".into(), "fox".into()]);
+        ix.add_document(2, &["quick".into(), "brown".into(), "dog".into()]);
+        ix.add_document(3, &["quick".into(), "brown".into(), "quick".into()]);
+
+        let query = vec!["quick".into(), "brown".into()];
+        let hits = ix
+            .retrieve_candidates(&query, &[2, 2, 999], 10, Bm25Params::default())
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, 2);
+        let expected = ix.score(2, &query, Bm25Params::default());
+        assert!((hits[0].1 - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn retrieve_candidates_matches_exhaustive_filtered_ranking() {
+        let mut ix = InvertedIndex::new();
+        ix.add_document(1, &["a".into(), "b".into(), "b".into()]);
+        ix.add_document(2, &["a".into()]);
+        ix.add_document(3, &["b".into(), "c".into()]);
+        ix.add_document(4, &["a".into(), "b".into(), "c".into()]);
+
+        let query = vec!["a".into(), "b".into()];
+        let candidates = vec![4, 1, 4, 3];
+        let mut expected: Vec<(u32, f32)> = {
+            let mut docs = candidates.clone();
+            docs.sort_unstable();
+            docs.dedup();
+            docs.into_iter()
+                .filter_map(|doc_id| {
+                    let score = ix.score(doc_id, &query, Bm25Params::default());
+                    (score.is_finite() && score > 0.0).then_some((doc_id, score))
+                })
+                .collect()
+        };
+        expected.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        expected.truncate(2);
+
+        let hits = ix
+            .retrieve_candidates(&query, &candidates, 2, Bm25Params::default())
+            .unwrap();
+        assert_eq!(hits, expected);
     }
 
     fn build_test_index() -> InvertedIndex {

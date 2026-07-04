@@ -16,6 +16,8 @@ Lexical scoring over postings lists.
 ## What it is
 
 `lexir` is the scoring/ranking layer. Candidate generation and storage live in `postings`.
+Exact filters such as phrase/proximity matching should produce candidate doc ids,
+then pass those candidates to `lexir` for ranking.
 
 ## Storage model
 
@@ -29,9 +31,10 @@ from the segment files during search. Multi-segment raw search treats the files
 as one corpus by sharing corpus-level IDF and average document length, then
 merges per-segment top-k results with a conservative segment-pruning bound.
 
-`lexir` does not own tokenization, term-id assignment, raw segment commit
-lifecycle, deletes, or segment merges. Those stay with the caller or a storage
-layer above `postings::raw`.
+`lexir` does not own tokenization, term-id assignment, positional storage,
+phrase/proximity execution, raw segment commit lifecycle, deletes, or segment
+merges. Those stay with `postings`, the caller, or a storage layer above
+`postings::raw`.
 
 ## Building
 
@@ -59,6 +62,28 @@ let mut idx = InvertedIndex::new();
 idx.add_document(1, &["hello".to_string(), "world".to_string()]);
 let hits = idx.retrieve(&["hello".to_string()], 10, Default::default()).unwrap();
 assert_eq!(hits[0].0, 1);
+```
+
+**BM25 over prefiltered candidates**:
+
+```rust
+use lexir::bm25::{Bm25Params, InvertedIndex};
+
+let mut idx = InvertedIndex::new();
+idx.add_document(1, &["quick".to_string(), "brown".to_string(), "fox".to_string()]);
+idx.add_document(2, &["quick".to_string(), "brown".to_string(), "dog".to_string()]);
+
+// Candidate ids can come from `postings::positional`, a boolean planner, or caller code.
+let phrase_candidates = [2];
+let hits = idx
+    .retrieve_candidates(
+        &["quick".to_string(), "brown".to_string()],
+        &phrase_candidates,
+        10,
+        Bm25Params::default(),
+    )
+    .unwrap();
+assert_eq!(hits[0].0, 2);
 ```
 
 **TF-IDF** (requires multiple docs for non-zero IDF):
@@ -109,6 +134,10 @@ local document frequencies. For an immutable segment set, use
 `retrieve_bm25_raw_files_with_stats`, so every segment uses the same IDF and
 average document length. The multi-file path orders segments by a conservative
 BM25 upper bound and can skip segments that cannot enter the current top-k.
+Use `retrieve_bm25_raw_file_candidates` or
+`retrieve_bm25_raw_files_candidates` when an exact filter has already produced
+candidate doc ids, for example from `postings::positional::raw` phrase or NEAR
+matching.
 For streaming ingestion, `retrieve_bm25_raw_files_and_index` searches sealed
 raw segment files plus one live `postings::PostingsIndex<u64, u32>` shard with
 shared BM25 corpus stats, scoring the live shard first so its top-k threshold

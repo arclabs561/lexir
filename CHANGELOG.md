@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `InvertedIndex::retrieve_candidates` for BM25 ranking over caller-supplied
+  doc-id sets, so phrase/proximity filters can stay in `postings` while `lexir`
+  owns scoring.
+- Added raw-segment candidate BM25 helpers for byte-backed, file-backed, and
+  multi-file raw segments, so exact filters can feed out-of-core BM25 ranking.
+- Added Criterion benchmark cases for in-memory and raw-file BM25 over
+  caller-supplied candidate doc ids.
 - Added a `raw_bm25_generation` example showing streaming lexical ingestion
   into raw files plus one live shard, with a persisted term-id dictionary
   sidecar.

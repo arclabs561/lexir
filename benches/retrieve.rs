@@ -337,6 +337,27 @@ fn bench_bm25_retrieve(c: &mut Criterion) {
         },
     );
 
+    let candidate_query = query_terms(&index, 8, 20);
+    let candidate_docs: Vec<_> = (0..N_DOCS).step_by(16).collect();
+    group.bench_with_input(
+        BenchmarkId::new("candidate_terms", candidate_docs.len()),
+        &candidate_query,
+        |b, query| {
+            b.iter(|| {
+                black_box(
+                    index
+                        .retrieve_candidates(
+                            black_box(query.as_slice()),
+                            black_box(candidate_docs.as_slice()),
+                            10,
+                            params,
+                        )
+                        .unwrap(),
+                );
+            });
+        },
+    );
+
     group.finish();
 }
 
@@ -434,6 +455,32 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
                         black_box(query.as_slice()),
                         10,
                         params,
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+
+    let candidate_docs: Vec<_> = (0..N_DOCS).step_by(16).collect();
+    let candidate_query = raw_query_terms(&segment, 8, 20);
+    let candidate_stats = {
+        let mut segments = [&mut segment];
+        lexir::raw::RawBm25CorpusStats::from_raw_files(&mut segments, &candidate_query).unwrap()
+    };
+    group.bench_with_input(
+        BenchmarkId::new("file_candidate_terms", candidate_docs.len()),
+        &candidate_query,
+        |b, query| {
+            b.iter(|| {
+                black_box(
+                    lexir::raw::retrieve_bm25_raw_file_candidates_with_stats(
+                        black_box(&mut segment),
+                        black_box(query.as_slice()),
+                        black_box(candidate_docs.as_slice()),
+                        10,
+                        params,
+                        black_box(&candidate_stats),
                     )
                     .unwrap(),
                 );
@@ -573,6 +620,26 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
                     lexir::raw::retrieve_bm25_raw_files_with_search_stats(
                         black_box(segments.as_mut_slice()),
                         black_box(query.as_slice()),
+                        10,
+                        params,
+                        black_box(&all_term_stats_64),
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new("files_candidate_terms_all_stats_64", candidate_docs.len()),
+        &multi_query,
+        |b, query| {
+            let mut segments: Vec<_> = multi_segments_64.iter_mut().collect();
+            b.iter(|| {
+                black_box(
+                    lexir::raw::retrieve_bm25_raw_files_candidates_with_stats(
+                        black_box(segments.as_mut_slice()),
+                        black_box(query.as_slice()),
+                        black_box(candidate_docs.as_slice()),
                         10,
                         params,
                         black_box(&all_term_stats_64),

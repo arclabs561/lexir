@@ -795,6 +795,51 @@ pub fn retrieve_bm25_raw_segment_with_stats(
     retrieve_bm25_raw_with_stats(&mut segment, query_terms, k, params, stats)
 }
 
+/// Rank caller-supplied candidate documents using BM25 over a byte-backed raw
+/// segment.
+///
+/// Candidate ids are treated as a set. This is the raw-segment composition
+/// point for exact filters such as positional phrase/proximity matches.
+pub fn retrieve_bm25_raw_segment_candidates(
+    segment: &RawSegment<'_>,
+    query_terms: &[RawTermId],
+    candidate_docs: &[DocId],
+    k: usize,
+    params: Bm25Params,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<postings::raw::Error>> {
+    let mut segment = *segment;
+    let stats = RawBm25CorpusStats::from_reader(&mut segment, query_terms)?;
+    retrieve_bm25_raw_candidates_with_stats(
+        &mut segment,
+        query_terms,
+        candidate_docs,
+        k,
+        params,
+        &stats,
+    )
+}
+
+/// Rank caller-supplied candidate documents over a byte-backed raw segment
+/// using caller-provided corpus stats.
+pub fn retrieve_bm25_raw_segment_candidates_with_stats(
+    segment: &RawSegment<'_>,
+    query_terms: &[RawTermId],
+    candidate_docs: &[DocId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<postings::raw::Error>> {
+    let mut segment = *segment;
+    retrieve_bm25_raw_candidates_with_stats(
+        &mut segment,
+        query_terms,
+        candidate_docs,
+        k,
+        params,
+        stats,
+    )
+}
+
 /// Retrieve top-k documents using BM25 over a file-backed raw segment.
 ///
 /// The fixed segment directories stay in memory; posting payloads are read from
@@ -819,6 +864,35 @@ pub fn retrieve_bm25_raw_file_with_stats(
     stats: &RawBm25CorpusStats,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
     retrieve_bm25_raw_file_with_stats_min_score(segment, query_terms, k, params, stats, None)
+}
+
+/// Rank caller-supplied candidate documents using BM25 over a file-backed raw
+/// segment.
+///
+/// Posting payloads are read only for query terms; non-candidate postings are
+/// skipped during scoring.
+pub fn retrieve_bm25_raw_file_candidates(
+    segment: &mut RawSegmentFile,
+    query_terms: &[RawTermId],
+    candidate_docs: &[DocId],
+    k: usize,
+    params: Bm25Params,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    let stats = RawBm25CorpusStats::from_reader(segment, query_terms)?;
+    retrieve_bm25_raw_candidates_with_stats(segment, query_terms, candidate_docs, k, params, &stats)
+}
+
+/// Rank caller-supplied candidate documents over a file-backed raw segment
+/// using caller-provided corpus stats.
+pub fn retrieve_bm25_raw_file_candidates_with_stats(
+    segment: &mut RawSegmentFile,
+    query_terms: &[RawTermId],
+    candidate_docs: &[DocId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    retrieve_bm25_raw_candidates_with_stats(segment, query_terms, candidate_docs, k, params, stats)
 }
 
 fn retrieve_bm25_raw_file_with_stats_min_score(
@@ -910,6 +984,69 @@ pub fn retrieve_bm25_raw_files_with_stats(
         Vec::new(),
     )
     .map(|result| result.hits)
+}
+
+/// Rank caller-supplied candidate documents across file-backed raw segments as
+/// one BM25 corpus.
+///
+/// Segment document ids must already be globally unique. This helper builds
+/// query-scoped corpus stats from all segments, then scores only the supplied
+/// candidate doc ids.
+pub fn retrieve_bm25_raw_files_candidates(
+    segments: &mut [&mut RawSegmentFile],
+    query_terms: &[RawTermId],
+    candidate_docs: &[DocId],
+    k: usize,
+    params: Bm25Params,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    let stats = RawBm25CorpusStats::from_raw_files(segments, query_terms)?;
+    retrieve_bm25_raw_files_candidates_with_stats(
+        segments,
+        query_terms,
+        candidate_docs,
+        k,
+        params,
+        &stats,
+    )
+}
+
+/// Rank caller-supplied candidate documents across file-backed raw segments
+/// using caller-provided corpus stats.
+///
+/// Segment document ids must already be globally unique. Passing shared corpus
+/// stats keeps BM25 IDF and length normalization consistent across all
+/// immutable segments.
+pub fn retrieve_bm25_raw_files_candidates_with_stats(
+    segments: &mut [&mut RawSegmentFile],
+    query_terms: &[RawTermId],
+    candidate_docs: &[DocId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    if query_terms.is_empty() {
+        return Err(RawScoringError::EmptyQuery);
+    }
+    if stats.num_docs() == 0 {
+        return Err(RawScoringError::EmptyIndex);
+    }
+    if k == 0 || candidate_docs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let candidates = sorted_unique_doc_ids(candidate_docs);
+    let mut hits = Vec::with_capacity(k.saturating_mul(segments.len()));
+    for segment in segments {
+        hits.extend(retrieve_bm25_raw_candidates_with_stats_sorted(
+            *segment,
+            query_terms,
+            &candidates,
+            k,
+            params,
+            stats,
+        )?);
+    }
+    Ok(top_k_positive_scored_docs(hits, k))
 }
 
 /// Retrieve top-k documents across file-backed raw segments and one live
@@ -1157,6 +1294,119 @@ where
 {
     retrieve_bm25_raw_with_stats_and_search_stats(segment, query_terms, k, params, stats)
         .map(|result| result.hits)
+}
+
+fn retrieve_bm25_raw_candidates_with_stats<S>(
+    segment: &mut S,
+    query_terms: &[RawTermId],
+    candidate_docs: &[DocId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<S::Error>>
+where
+    S: RawSegmentRead,
+{
+    let candidates = sorted_unique_doc_ids(candidate_docs);
+    retrieve_bm25_raw_candidates_with_stats_sorted(
+        segment,
+        query_terms,
+        &candidates,
+        k,
+        params,
+        stats,
+    )
+}
+
+fn retrieve_bm25_raw_candidates_with_stats_sorted<S>(
+    segment: &mut S,
+    query_terms: &[RawTermId],
+    candidate_docs: &[DocId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<S::Error>>
+where
+    S: RawSegmentRead,
+{
+    if query_terms.is_empty() {
+        return Err(RawScoringError::EmptyQuery);
+    }
+    if stats.num_docs() == 0 {
+        return Err(RawScoringError::EmptyIndex);
+    }
+    if k == 0 || candidate_docs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let avg_doc_len = stats.avg_doc_len();
+    if avg_doc_len <= 0.0 || !avg_doc_len.is_finite() {
+        return Ok(Vec::new());
+    }
+
+    let mut terms = raw_term_multiplicities(query_terms);
+    for term in &mut terms {
+        let df = segment.df(term.term_id).map_err(RawScoringError::Source)?;
+        if df == 0 {
+            continue;
+        }
+        let corpus_df = stats
+            .df(term.term_id)
+            .ok_or(RawScoringError::MissingCorpusStats(term.term_id))?;
+        term.idf = bm25_idf_plus1(stats.num_docs(), corpus_df);
+    }
+    terms.retain(|term| term.idf != 0.0);
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let capacity = candidate_docs.len().min(stats.num_docs() as usize);
+    let mut scores = HashMap::with_capacity(capacity);
+    let mut doc_lengths = HashMap::with_capacity(capacity);
+    for term in terms {
+        let postings = segment
+            .postings(term.term_id)
+            .map_err(RawScoringError::Source)?;
+        let mut posting_index = 0;
+        let mut candidate_index = 0;
+        while posting_index < postings.len() && candidate_index < candidate_docs.len() {
+            let (doc_id, tf) = postings[posting_index];
+            match doc_id.cmp(&candidate_docs[candidate_index]) {
+                std::cmp::Ordering::Less => {
+                    posting_index += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    candidate_index += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    let doc_length = match doc_lengths.get(&doc_id) {
+                        Some(&len) => len,
+                        None => {
+                            let len = segment
+                                .document_len(doc_id)
+                                .map_err(RawScoringError::Source)?
+                                .unwrap_or(0);
+                            doc_lengths.insert(doc_id, len);
+                            len
+                        }
+                    };
+                    if doc_length != 0 {
+                        let tf_score =
+                            bm25_tf_score(tf as f32, doc_length as f32, avg_doc_len, params);
+                        let contribution = term.idf * tf_score;
+                        if contribution != 0.0 {
+                            let score = scores.entry(doc_id).or_insert(0.0);
+                            *score += contribution * term.count as f32;
+                        }
+                    }
+
+                    posting_index += 1;
+                    candidate_index += 1;
+                }
+            }
+        }
+    }
+
+    Ok(top_k_positive_scored_docs(scores, k))
 }
 
 fn raw_infallible_error<E>(err: RawScoringError<Infallible>) -> RawScoringError<E> {
@@ -2013,6 +2263,13 @@ fn raw_term_multiplicities(query_terms: &[RawTermId]) -> Vec<WeightedRawTerm> {
     counts
 }
 
+fn sorted_unique_doc_ids(doc_ids: &[DocId]) -> Vec<DocId> {
+    let mut docs = doc_ids.to_vec();
+    docs.sort_unstable();
+    docs.dedup();
+    docs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2116,6 +2373,19 @@ mod tests {
     ) -> Vec<(DocId, f32)> {
         let memory_query: Vec<String> = query.iter().map(ToString::to_string).collect();
         index.retrieve(&memory_query, k, params).unwrap()
+    }
+
+    fn raw_bm25_memory_candidate_hits(
+        index: &InvertedIndex,
+        query: &[RawTermId],
+        candidate_docs: &[DocId],
+        k: usize,
+        params: Bm25Params,
+    ) -> Vec<(DocId, f32)> {
+        let memory_query: Vec<String> = query.iter().map(ToString::to_string).collect();
+        index
+            .retrieve_candidates(&memory_query, candidate_docs, k, params)
+            .unwrap()
     }
 
     fn assert_hits_close(expected: &[(DocId, f32)], got: &[(DocId, f32)], context: &str) {
@@ -2280,6 +2550,80 @@ mod tests {
                 "doc {raw_doc}: raw={raw_score}, memory={memory_score}"
             );
         }
+    }
+
+    #[test]
+    fn raw_bm25_candidates_match_in_memory_index() {
+        let raw_docs = build_raw_docs();
+        let index = build_memory_index(&raw_docs);
+        let bytes = build_raw_bytes(&raw_docs);
+        let segment = RawSegment::open(&bytes).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw.segment");
+        std::fs::write(&path, &bytes).unwrap();
+        let mut file_segment = RawSegmentFile::open(&path).unwrap();
+
+        let query = vec![10, 30, 10];
+        let candidates = vec![2, 0, 2, 99];
+        let expected =
+            raw_bm25_memory_candidate_hits(&index, &query, &candidates, 10, Bm25Params::default());
+
+        let byte_hits = retrieve_bm25_raw_segment_candidates(
+            &segment,
+            &query,
+            &candidates,
+            10,
+            Bm25Params::default(),
+        )
+        .unwrap();
+        assert_hits_close(&expected, &byte_hits, "byte candidates");
+
+        let file_hits = retrieve_bm25_raw_file_candidates(
+            &mut file_segment,
+            &query,
+            &candidates,
+            10,
+            Bm25Params::default(),
+        )
+        .unwrap();
+        assert_hits_close(&expected, &file_hits, "file candidates");
+    }
+
+    #[test]
+    fn raw_bm25_file_candidates_match_in_memory_across_segments() {
+        let first_docs = vec![(10, vec![(1, 2), (2, 1)]), (20, vec![(1, 1), (3, 4)])];
+        let second_docs = vec![
+            (100, vec![(2, 3), (3, 1)]),
+            (110, vec![(1, 1), (2, 1), (3, 1)]),
+        ];
+        let mut all_docs = first_docs.clone();
+        all_docs.extend(second_docs.clone());
+        let index = build_memory_index_with_doc_ids(&all_docs);
+
+        let dir = tempfile::tempdir().unwrap();
+        let first_path = dir.path().join("first.raw");
+        let second_path = dir.path().join("second.raw");
+        std::fs::write(&first_path, build_raw_bytes_with_doc_ids(&first_docs)).unwrap();
+        std::fs::write(&second_path, build_raw_bytes_with_doc_ids(&second_docs)).unwrap();
+        let mut first_segment = RawSegmentFile::open(&first_path).unwrap();
+        let mut second_segment = RawSegmentFile::open(&second_path).unwrap();
+
+        let query = vec![1, 2, 1];
+        let candidates = vec![110, 20, 110, 999];
+        let expected =
+            raw_bm25_memory_candidate_hits(&index, &query, &candidates, 10, Bm25Params::default());
+        let mut segments = [&mut first_segment, &mut second_segment];
+
+        let raw_hits = retrieve_bm25_raw_files_candidates(
+            &mut segments,
+            &query,
+            &candidates,
+            10,
+            Bm25Params::default(),
+        )
+        .unwrap();
+
+        assert_hits_close(&expected, &raw_hits, "multi-file candidates");
     }
 
     #[test]
