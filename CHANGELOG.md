@@ -22,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Changed file-backed raw BM25 retrieval to use raw posting-block metadata for
   top-k block pruning on broad nonnegative BM25 queries.
 - Changed the `raw_bm25_segment` example to encode lexical documents and queries
-  with `RawTermDictionary`.
+  with `RawTermDictionary` and seal a live numeric postings shard into a raw
+  segment file.
 
 ## [0.2.5] - 2026-07-03
 

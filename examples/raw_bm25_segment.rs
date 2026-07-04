@@ -1,12 +1,13 @@
 //! BM25 over a file-backed postings raw segment, with lexical terms encoded
-//! through `RawTermDictionary`.
+//! through `RawTermDictionary` and sealed from a live numeric postings shard.
 //!
 //! Run:
 //! `cargo run --example raw_bm25_segment --features raw-segment`
 
 use lexir::bm25::Bm25Params;
 use lexir::raw::{retrieve_bm25_raw_file, RawTermDictionary};
-use postings::raw::{write_u64_u32_segment_sorted_from_iter_to, RawDocument, RawSegmentFile};
+use postings::raw::{write_u64_u32_segment_from_index_seekable_to, RawSegmentFile};
+use postings::PostingsIndex;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let corpus = [
@@ -32,15 +33,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|terms| (doc.id, terms))
         })
         .collect::<Result<_, _>>()?;
-    let raw_docs: Vec<_> = encoded_docs
-        .iter()
-        .map(|(doc_id, terms)| RawDocument::new(*doc_id, terms))
-        .collect();
+    let mut live_shard = PostingsIndex::new();
+    for (doc_id, terms) in &encoded_docs {
+        live_shard.add_weighted_document(*doc_id, terms)?;
+    }
 
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("lexir.raw");
     let mut file = std::fs::File::create(&path)?;
-    write_u64_u32_segment_sorted_from_iter_to(raw_docs.iter().copied(), &mut file)?;
+    write_u64_u32_segment_from_index_seekable_to(&live_shard, &mut file)?;
     file.sync_all()?;
     drop(file);
 
