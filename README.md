@@ -111,7 +111,9 @@ BM25 upper bound and can skip segments that cannot enter the current top-k.
 Use `retrieve_bm25_raw_files_with_search_stats` when you need searched/pruned
 segment counts for profiling. `RawBm25CorpusStats::from_raw_files_all_terms`
 builds reusable stats for all terms in a raw segment generation without reading
-postings payloads. Segment document ids must already be globally unique.
+postings payloads. File-backed BM25 can also use raw posting-block metadata to
+skip blocks that cannot enter the current top-k. Segment document ids must
+already be globally unique.
 
 `RawTermDictionary` is an in-process adapter from lexical terms to numeric raw
 term ids. `insert` assigns ids in insertion order; `from_terms_sorted` assigns

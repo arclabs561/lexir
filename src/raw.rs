@@ -8,7 +8,9 @@
 
 use crate::bm25::{bm25_tf_score, Bm25Params, Bm25Variant};
 use crate::ranking::top_k_positive_scored_docs;
-use postings::raw::{RawSegment, RawSegmentFile, RawSegmentFileError, RawTermId};
+use postings::raw::{
+    RawPostingBlockMeta, RawSegment, RawSegmentFile, RawSegmentFileError, RawTermId,
+};
 use postings::DocId;
 use rankfns::bm25_idf_plus1;
 use std::collections::{BTreeMap, HashMap};
@@ -537,6 +539,11 @@ pub fn retrieve_bm25_raw_file_with_stats(
     params: Bm25Params,
     stats: &RawBm25CorpusStats,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    if let Some(hits) =
+        retrieve_bm25_raw_file_with_stats_pruned_blocks(segment, query_terms, k, params, stats)?
+    {
+        return Ok(hits);
+    }
     retrieve_bm25_raw_with_stats(segment, query_terms, k, params, stats)
 }
 
@@ -785,6 +792,396 @@ where
     }
 
     Ok(top_k_positive_scored_docs(scores, k))
+}
+
+const RAW_BM25_BLOCK_PRUNE_MIN_BLOCKS: usize = 16;
+const RAW_BM25_BLOCK_PRUNE_MIN_TOUCHES: usize = 4096;
+
+struct RawBm25BlockScoringPlan {
+    terms: Vec<RawBm25BlockScoringTerm>,
+    touched_upper_bound: usize,
+    total_blocks: usize,
+}
+
+struct RawBm25PendingBlockTerm {
+    term_id: RawTermId,
+    count: usize,
+    idf: f32,
+}
+
+struct RawBm25BlockScoringTerm {
+    term_id: RawTermId,
+    count: usize,
+    idf: f32,
+    blocks: Vec<RawPostingBlockMeta>,
+}
+
+fn retrieve_bm25_raw_file_with_stats_pruned_blocks(
+    segment: &mut RawSegmentFile,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<Option<Vec<(DocId, f32)>>, RawScoringError<RawSegmentFileError>> {
+    if query_terms.is_empty() {
+        return Err(RawScoringError::EmptyQuery);
+    }
+    if stats.num_docs() == 0 {
+        return Err(RawScoringError::EmptyIndex);
+    }
+    if k == 0 {
+        return Ok(Some(Vec::new()));
+    }
+    let avg_doc_len = stats.avg_doc_len();
+    if avg_doc_len <= 0.0 || !avg_doc_len.is_finite() {
+        return Ok(Some(Vec::new()));
+    }
+    if !can_prune_raw_bm25_blocks(params) {
+        return Ok(None);
+    }
+    if (segment.num_docs() as usize) < RAW_BM25_BLOCK_PRUNE_MIN_TOUCHES {
+        return Ok(None);
+    }
+
+    let Some(plan) = prepare_raw_bm25_block_scoring_plan(segment, query_terms, stats)? else {
+        return Ok(None);
+    };
+    if plan.terms.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    if plan.total_blocks < RAW_BM25_BLOCK_PRUNE_MIN_BLOCKS || plan.total_blocks <= plan.terms.len()
+    {
+        return Ok(None);
+    }
+
+    if let Some((doc_base, slots)) =
+        dense_bm25_range(segment, plan.touched_upper_bound).map_err(RawScoringError::Source)?
+    {
+        return retrieve_bm25_raw_file_pruned_blocks_dense(
+            segment,
+            &plan.terms,
+            doc_base,
+            slots,
+            k,
+            params,
+            avg_doc_len,
+        )
+        .map(Some);
+    }
+
+    retrieve_bm25_raw_file_pruned_blocks_sparse(
+        segment,
+        &plan.terms,
+        plan.touched_upper_bound,
+        stats.num_docs(),
+        k,
+        params,
+        avg_doc_len,
+    )
+    .map(Some)
+}
+
+fn prepare_raw_bm25_block_scoring_plan(
+    segment: &mut RawSegmentFile,
+    query_terms: &[RawTermId],
+    stats: &RawBm25CorpusStats,
+) -> Result<Option<RawBm25BlockScoringPlan>, RawScoringError<RawSegmentFileError>> {
+    let terms = raw_term_multiplicities(query_terms);
+    let mut pending_terms = Vec::with_capacity(terms.len());
+    let mut touched_upper_bound = 0usize;
+
+    for term in terms {
+        let df = segment.df(term.term_id).map_err(RawScoringError::Source)?;
+        if df == 0 {
+            continue;
+        }
+        let corpus_df = stats
+            .df(term.term_id)
+            .ok_or(RawScoringError::MissingCorpusStats(term.term_id))?;
+        let idf = bm25_idf_plus1(stats.num_docs(), corpus_df);
+        if idf == 0.0 {
+            continue;
+        }
+
+        touched_upper_bound = touched_upper_bound.saturating_add(df as usize);
+        pending_terms.push(RawBm25PendingBlockTerm {
+            term_id: term.term_id,
+            count: term.count,
+            idf,
+        });
+    }
+
+    if pending_terms.is_empty() {
+        return Ok(Some(RawBm25BlockScoringPlan {
+            terms: Vec::new(),
+            touched_upper_bound,
+            total_blocks: 0,
+        }));
+    }
+    if touched_upper_bound < RAW_BM25_BLOCK_PRUNE_MIN_TOUCHES {
+        return Ok(None);
+    }
+
+    let mut scoring_terms = Vec::with_capacity(pending_terms.len());
+    let mut total_blocks = 0usize;
+    for term in pending_terms {
+        let blocks = segment
+            .posting_blocks(term.term_id)
+            .map_err(RawSegmentFileError::from)
+            .map_err(RawScoringError::Source)?;
+        if blocks.is_empty() {
+            return Ok(None);
+        }
+        total_blocks = total_blocks.saturating_add(blocks.len());
+        scoring_terms.push(RawBm25BlockScoringTerm {
+            term_id: term.term_id,
+            count: term.count,
+            idf: term.idf,
+            blocks,
+        });
+    }
+
+    Ok(Some(RawBm25BlockScoringPlan {
+        terms: scoring_terms,
+        touched_upper_bound,
+        total_blocks,
+    }))
+}
+
+fn retrieve_bm25_raw_file_pruned_blocks_dense(
+    segment: &mut RawSegmentFile,
+    terms: &[RawBm25BlockScoringTerm],
+    doc_base: DocId,
+    slots: usize,
+    k: usize,
+    params: Bm25Params,
+    avg_doc_len: f32,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    let mut scores = vec![0.0; slots];
+    let mut seen = vec![false; slots];
+    let mut touched = Vec::new();
+    let mut threshold = RawBm25TopKThreshold::new(k);
+
+    for term in terms {
+        for (block_index, &block) in term.blocks.iter().enumerate() {
+            let upper_bound = raw_bm25_block_range_upper_bound(block, terms, avg_doc_len, params);
+            if threshold
+                .threshold()
+                .is_some_and(|threshold| upper_bound < threshold)
+            {
+                continue;
+            }
+
+            segment
+                .for_each_posting_block_with_document_len(
+                    term.term_id,
+                    block_index as u32,
+                    |doc_id, tf, doc_length| {
+                        let slot = dense_doc_slot(doc_id, doc_base, slots);
+                        if !seen[slot] {
+                            seen[slot] = true;
+                            touched.push((doc_id, slot));
+                        }
+                        if doc_length == 0 {
+                            return;
+                        }
+
+                        let tf_score =
+                            bm25_tf_score(tf as f32, doc_length as f32, avg_doc_len, params);
+                        let contribution = term.idf * tf_score;
+                        if contribution != 0.0 {
+                            scores[slot] += contribution * term.count as f32;
+                            threshold.update(doc_id, scores[slot]);
+                        }
+                    },
+                )
+                .map_err(RawScoringError::Source)?;
+        }
+    }
+
+    Ok(top_k_positive_scored_docs(
+        touched
+            .into_iter()
+            .map(|(doc_id, slot)| (doc_id, scores[slot])),
+        k,
+    ))
+}
+
+fn retrieve_bm25_raw_file_pruned_blocks_sparse(
+    segment: &mut RawSegmentFile,
+    terms: &[RawBm25BlockScoringTerm],
+    touched_upper_bound: usize,
+    num_docs: u32,
+    k: usize,
+    params: Bm25Params,
+    avg_doc_len: f32,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    let capacity = touched_upper_bound.min(num_docs as usize);
+    let mut scores = HashMap::with_capacity(capacity);
+    let mut threshold = RawBm25TopKThreshold::new(k);
+
+    for term in terms {
+        for (block_index, &block) in term.blocks.iter().enumerate() {
+            let upper_bound = raw_bm25_block_range_upper_bound(block, terms, avg_doc_len, params);
+            if threshold
+                .threshold()
+                .is_some_and(|threshold| upper_bound < threshold)
+            {
+                continue;
+            }
+
+            segment
+                .for_each_posting_block_with_document_len(
+                    term.term_id,
+                    block_index as u32,
+                    |doc_id, tf, doc_length| {
+                        if doc_length == 0 {
+                            return;
+                        }
+
+                        let tf_score =
+                            bm25_tf_score(tf as f32, doc_length as f32, avg_doc_len, params);
+                        let contribution = term.idf * tf_score;
+                        if contribution != 0.0 {
+                            let score = scores.entry(doc_id).or_insert(0.0);
+                            *score += contribution * term.count as f32;
+                            threshold.update(doc_id, *score);
+                        }
+                    },
+                )
+                .map_err(RawScoringError::Source)?;
+        }
+    }
+
+    Ok(top_k_positive_scored_docs(scores, k))
+}
+
+fn raw_bm25_block_range_upper_bound(
+    block: RawPostingBlockMeta,
+    terms: &[RawBm25BlockScoringTerm],
+    avg_doc_len: f32,
+    params: Bm25Params,
+) -> f32 {
+    terms
+        .iter()
+        .map(|term| {
+            let max_tf = max_overlapping_raw_block_weight(&term.blocks, block);
+            if max_tf == 0 {
+                return 0.0;
+            }
+            term.idf * term.count as f32 * bm25_tf_upper_bound(max_tf as f32, avg_doc_len, params)
+        })
+        .sum()
+}
+
+fn max_overlapping_raw_block_weight(
+    blocks: &[RawPostingBlockMeta],
+    target: RawPostingBlockMeta,
+) -> u32 {
+    let start = blocks.partition_point(|block| block.last_doc_id() < target.base_doc_id());
+    let mut max_weight = 0u32;
+    for block in &blocks[start..] {
+        if block.base_doc_id() > target.last_doc_id() {
+            break;
+        }
+        max_weight = max_weight.max(block.max_weight());
+    }
+    max_weight
+}
+
+fn can_prune_raw_bm25_blocks(params: Bm25Params) -> bool {
+    params.k1.is_finite()
+        && params.k1 >= 0.0
+        && params.b.is_finite()
+        && (0.0..=1.0).contains(&params.b)
+        && match params.variant {
+            Bm25Variant::Standard => true,
+            Bm25Variant::BM25L { delta } | Bm25Variant::BM25Plus { delta } => {
+                delta.is_finite() && delta >= 0.0
+            }
+        }
+}
+
+struct RawBm25TopKThreshold {
+    ranked: Vec<(DocId, f32)>,
+    k: usize,
+    sorted: bool,
+}
+
+impl RawBm25TopKThreshold {
+    fn new(k: usize) -> Self {
+        Self {
+            ranked: Vec::with_capacity(k),
+            k,
+            sorted: false,
+        }
+    }
+
+    fn update(&mut self, doc_id: DocId, score: f32) {
+        if self.k == 0 || !score.is_finite() || score <= 0.0 {
+            return;
+        }
+
+        if let Some(index) = self
+            .ranked
+            .iter()
+            .position(|(ranked_doc_id, _)| *ranked_doc_id == doc_id)
+        {
+            self.ranked[index].1 = score;
+            if self.sorted {
+                self.bubble_up(index);
+            }
+            return;
+        }
+
+        if self.ranked.len() < self.k {
+            self.ranked.push((doc_id, score));
+            self.sorted = false;
+            return;
+        }
+
+        self.sort_if_needed();
+        let candidate = (doc_id, score);
+        if cmp_raw_bm25_doc_scores(
+            &candidate,
+            self.ranked.last().expect("top-k buffer is full"),
+        )
+        .is_lt()
+        {
+            let last = self.ranked.len() - 1;
+            self.ranked[last] = candidate;
+            self.bubble_up(last);
+        }
+    }
+
+    fn threshold(&mut self) -> Option<f32> {
+        if self.ranked.len() < self.k {
+            return None;
+        }
+        self.sort_if_needed();
+        self.ranked.last().map(|(_, score)| *score)
+    }
+
+    fn sort_if_needed(&mut self) {
+        if !self.sorted {
+            self.ranked.sort_by(cmp_raw_bm25_doc_scores);
+            self.sorted = true;
+        }
+    }
+
+    fn bubble_up(&mut self, mut index: usize) {
+        while index > 0
+            && cmp_raw_bm25_doc_scores(&self.ranked[index], &self.ranked[index - 1]).is_lt()
+        {
+            self.ranked.swap(index, index - 1);
+            index -= 1;
+        }
+    }
+}
+
+#[inline]
+fn cmp_raw_bm25_doc_scores(a: &(DocId, f32), b: &(DocId, f32)) -> std::cmp::Ordering {
+    b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0))
 }
 
 struct DenseRawBm25Plan {
@@ -1330,6 +1727,88 @@ mod tests {
     }
 
     #[test]
+    fn raw_bm25_file_block_pruning_uses_overlapping_term_bounds() {
+        const TERM_COMMON: RawTermId = 10;
+        const TERM_TAIL: RawTermId = 20;
+        let raw_docs: Vec<_> = (0..4096)
+            .map(|doc_id| {
+                let mut terms = vec![(
+                    TERM_COMMON,
+                    if (3000..3010).contains(&doc_id) {
+                        20
+                    } else {
+                        1
+                    },
+                )];
+                if doc_id >= 3000 {
+                    terms.push((TERM_TAIL, 90));
+                }
+                (doc_id, terms)
+            })
+            .collect();
+        let bytes = build_raw_bytes_with_doc_ids(&raw_docs);
+        let segment = RawSegment::open(&bytes).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw.segment");
+        std::fs::write(&path, &bytes).unwrap();
+        let mut file_segment = RawSegmentFile::open(&path).unwrap();
+        let query = vec![TERM_COMMON, TERM_TAIL];
+        let params = Bm25Params::default();
+        let stats = {
+            let mut segments = [&mut file_segment];
+            RawBm25CorpusStats::from_raw_files(&mut segments, &query).unwrap()
+        };
+        let expected =
+            retrieve_bm25_raw_segment_with_stats(&segment, &query, 10, params, &stats).unwrap();
+
+        let top_doc_id = expected[0].0;
+        assert!(
+            (3000..3128).contains(&top_doc_id),
+            "fixture top doc {top_doc_id} should land in the overlapping tail block"
+        );
+
+        let plan = prepare_raw_bm25_block_scoring_plan(&mut file_segment, &query, &stats)
+            .unwrap()
+            .expect("fixture should use block plan");
+        assert!(plan.total_blocks >= RAW_BM25_BLOCK_PRUNE_MIN_BLOCKS);
+        let common = plan
+            .terms
+            .iter()
+            .find(|term| term.term_id == TERM_COMMON)
+            .unwrap();
+        let target = common
+            .blocks
+            .iter()
+            .copied()
+            .find(|block| block.base_doc_id() <= top_doc_id && block.last_doc_id() >= top_doc_id)
+            .unwrap();
+        let bound =
+            raw_bm25_block_range_upper_bound(target, &plan.terms, stats.avg_doc_len(), params);
+        assert!(
+            bound >= expected[0].1,
+            "block upper bound {bound} must include overlapping term contributions \
+             above realized top score {}",
+            expected[0].1
+        );
+
+        let pruned = retrieve_bm25_raw_file_with_stats_pruned_blocks(
+            &mut file_segment,
+            &query,
+            10,
+            params,
+            &stats,
+        )
+        .unwrap()
+        .expect("fixture should enter the block-pruned path");
+        assert_hits_close(&expected, &pruned, "block-pruned file BM25");
+
+        let file_hits =
+            retrieve_bm25_raw_file_with_stats(&mut file_segment, &query, 10, params, &stats)
+                .unwrap();
+        assert_hits_close(&expected, &file_hits, "public file BM25");
+    }
+
+    #[test]
     fn dense_bm25_range_uses_file_segment_doc_id_span() {
         let raw_docs = generated_raw_docs(128, 64, 8, 0xd35e_5eed, |i| 1_000_000 + i);
         let bytes = build_raw_bytes_with_doc_ids(&raw_docs);
@@ -1709,6 +2188,23 @@ mod tests {
             STREAMING_BM25_MAX_QUERY_TERMS + 1,
             STREAMING_BM25_MIN_TOUCHED_POSTINGS
         ));
+    }
+
+    #[test]
+    fn raw_bm25_block_pruning_requires_nonnegative_parameters() {
+        assert!(can_prune_raw_bm25_blocks(Bm25Params::default()));
+        assert!(can_prune_raw_bm25_blocks(Bm25Params::bm25l()));
+        assert!(can_prune_raw_bm25_blocks(Bm25Params::bm25plus()));
+        assert!(!can_prune_raw_bm25_blocks(Bm25Params {
+            k1: 1.2,
+            b: -0.25,
+            variant: Bm25Variant::Standard,
+        }));
+        assert!(!can_prune_raw_bm25_blocks(Bm25Params {
+            k1: 1.2,
+            b: 0.75,
+            variant: Bm25Variant::bm25plus_with_delta(-1.0),
+        }));
     }
 
     #[test]

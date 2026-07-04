@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `RawTermDictionary` for mapping lexical terms to `postings::raw` term
   ids and encoding raw BM25 documents or queries.
 
+### Changed
+
+- Changed file-backed raw BM25 retrieval to use raw posting-block metadata for
+  top-k block pruning on broad nonnegative BM25 queries.
+
 ## [0.2.5] - 2026-07-03
 
 ### Changed
