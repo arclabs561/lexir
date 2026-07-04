@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ids and encoding raw BM25 documents or queries.
 - Added `retrieve_bm25_raw_file_with_search_stats` for single-segment raw BM25
   traversal diagnostics, including selected path and posting-block skip counts.
+- Added `RawBm25CorpusStats::from_raw_files_and_index` and
+  `retrieve_bm25_raw_files_and_index` for exact BM25 over sealed raw files plus
+  one live numeric postings shard.
 - Added a raw BM25 benchmark for the single-segment diagnostic search path.
 - Added a partitioned multi-file raw BM25 benchmark to show when segment-local
   vocabularies make segment pruning pay.

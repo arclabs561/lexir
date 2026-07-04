@@ -11,9 +11,10 @@ use crate::ranking::top_k_positive_scored_docs;
 use postings::raw::{
     RawPostingBlockMeta, RawSegment, RawSegmentFile, RawSegmentFileError, RawTermId,
 };
-use postings::DocId;
+use postings::{DocId, PostingsIndex};
 use rankfns::bm25_idf_plus1;
 use std::collections::{BTreeMap, HashMap};
+use std::convert::Infallible;
 use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
@@ -342,6 +343,62 @@ impl RawBm25CorpusStats {
         })
     }
 
+    /// Build query-scoped corpus stats from file-backed raw segments and one
+    /// live in-memory raw postings shard.
+    ///
+    /// This reads fixed segment directories for the unique query terms and uses
+    /// the live shard's postings metadata. Use this when querying sealed raw
+    /// generations plus a bounded in-memory shard as one BM25 corpus.
+    pub fn from_raw_files_and_index(
+        segments: &mut [&mut RawSegmentFile],
+        live_index: &PostingsIndex<RawTermId, u32>,
+        query_terms: &[RawTermId],
+    ) -> Result<Self, RawScoringError<RawSegmentFileError>> {
+        if query_terms.is_empty() {
+            return Err(RawScoringError::EmptyQuery);
+        }
+
+        let terms = raw_term_multiplicities(query_terms);
+        let mut num_docs = 0u32;
+        let mut total_doc_len = 0.0f64;
+        let mut dfs = HashMap::with_capacity(terms.len());
+        for term in &terms {
+            dfs.insert(term.term_id, 0u32);
+        }
+
+        for segment in segments.iter_mut() {
+            let segment_docs = segment.num_docs();
+            num_docs = num_docs.saturating_add(segment_docs);
+            total_doc_len += segment.avg_doc_len() as f64 * segment_docs as f64;
+
+            for term in &terms {
+                let df = segment.df(term.term_id).map_err(RawScoringError::Source)?;
+                if let Some(total_df) = dfs.get_mut(&term.term_id) {
+                    *total_df = total_df.saturating_add(df);
+                }
+            }
+        }
+
+        let live_docs = live_index.num_docs();
+        num_docs = num_docs.saturating_add(live_docs);
+        total_doc_len += live_index.avg_doc_len() as f64 * live_docs as f64;
+        for term in &terms {
+            if let Some(total_df) = dfs.get_mut(&term.term_id) {
+                *total_df = total_df.saturating_add(live_index.df(&term.term_id));
+            }
+        }
+
+        if num_docs == 0 {
+            return Err(RawScoringError::EmptyIndex);
+        }
+
+        Ok(Self {
+            num_docs,
+            avg_doc_len: (total_doc_len / num_docs as f64) as f32,
+            dfs,
+        })
+    }
+
     /// Build corpus stats for all terms present in file-backed raw segments.
     ///
     /// This reads fixed segment directories, not postings payloads. Use this
@@ -538,6 +595,66 @@ impl RawSegmentRead for RawSegmentFile {
     }
 }
 
+impl RawSegmentRead for &PostingsIndex<RawTermId, u32> {
+    type Error = Infallible;
+
+    fn num_docs(&self) -> u32 {
+        PostingsIndex::num_docs(self)
+    }
+
+    fn max_doc_id(&self) -> DocId {
+        self.document_ids().max().unwrap_or(0)
+    }
+
+    fn avg_doc_len(&self) -> f32 {
+        PostingsIndex::avg_doc_len(self)
+    }
+
+    fn df(&mut self, term_id: RawTermId) -> Result<u32, Self::Error> {
+        Ok(PostingsIndex::df(*self, &term_id))
+    }
+
+    fn document_len(&mut self, doc_id: DocId) -> Result<Option<u32>, Self::Error> {
+        Ok(Some(PostingsIndex::document_len(self, doc_id)))
+    }
+
+    fn for_each_document_len(
+        &mut self,
+        mut visit: impl FnMut(DocId, u32),
+    ) -> Result<(), Self::Error> {
+        for doc_id in self.document_ids() {
+            visit(doc_id, PostingsIndex::document_len(self, doc_id));
+        }
+        Ok(())
+    }
+
+    fn postings(&mut self, term_id: RawTermId) -> Result<Vec<(DocId, u32)>, Self::Error> {
+        Ok(self.postings_iter(&term_id).collect())
+    }
+
+    fn for_each_posting_with_document_len(
+        &mut self,
+        term_id: RawTermId,
+        mut visit: impl FnMut(DocId, u32, u32),
+    ) -> Result<(), Self::Error> {
+        for (doc_id, weight) in self.postings_iter(&term_id) {
+            visit(doc_id, weight, PostingsIndex::document_len(self, doc_id));
+        }
+        Ok(())
+    }
+
+    fn doc_id_range(&mut self) -> Result<Option<(DocId, DocId)>, Self::Error> {
+        let mut ids = self.document_ids();
+        let Some(first) = ids.next() else {
+            return Ok(None);
+        };
+        let (min_doc_id, max_doc_id) = ids.fold((first, first), |(min_id, max_id), doc_id| {
+            (min_id.min(doc_id), max_id.max(doc_id))
+        });
+        Ok(Some((min_doc_id, max_doc_id)))
+    }
+}
+
 /// Retrieve top-k documents using BM25 over a byte-backed raw segment.
 ///
 /// Query terms are numeric term ids from the caller's lexicon. Duplicate query
@@ -644,6 +761,55 @@ pub fn retrieve_bm25_raw_files_with_stats(
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
     retrieve_bm25_raw_files_with_search_stats(segments, query_terms, k, params, stats)
         .map(|result| result.hits)
+}
+
+/// Retrieve top-k documents across file-backed raw segments and one live
+/// in-memory raw postings shard as one BM25 corpus.
+///
+/// Raw segment document ids and live-shard document ids must already be
+/// globally unique among live documents. The caller owns any delete mask,
+/// update policy, or manifest rule needed to keep those sets disjoint.
+pub fn retrieve_bm25_raw_files_and_index(
+    segments: &mut [&mut RawSegmentFile],
+    live_index: &PostingsIndex<RawTermId, u32>,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    let stats = RawBm25CorpusStats::from_raw_files_and_index(segments, live_index, query_terms)?;
+    retrieve_bm25_raw_files_and_index_with_stats(
+        segments,
+        live_index,
+        query_terms,
+        k,
+        params,
+        &stats,
+    )
+}
+
+/// Retrieve top-k documents across file-backed raw segments and one live
+/// in-memory raw postings shard using caller-provided corpus stats.
+///
+/// Passing shared corpus stats keeps BM25 IDF and length normalization
+/// consistent across sealed files and the live shard.
+pub fn retrieve_bm25_raw_files_and_index_with_stats(
+    segments: &mut [&mut RawSegmentFile],
+    live_index: &PostingsIndex<RawTermId, u32>,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    let mut candidates =
+        retrieve_bm25_raw_files_with_stats(segments, query_terms, k, params, stats)?;
+    if live_index.num_docs() > 0 {
+        let mut live_reader = live_index;
+        let live_hits =
+            retrieve_bm25_raw_with_stats(&mut live_reader, query_terms, k, params, stats)
+                .map_err(raw_infallible_error)?;
+        candidates.extend(live_hits);
+    }
+    Ok(top_k_positive_scored_docs(candidates, k))
 }
 
 /// Retrieve top-k documents across file-backed raw segments and return
@@ -753,6 +919,17 @@ where
 {
     retrieve_bm25_raw_with_stats_and_search_stats(segment, query_terms, k, params, stats)
         .map(|result| result.hits)
+}
+
+fn raw_infallible_error<E>(err: RawScoringError<Infallible>) -> RawScoringError<E> {
+    match err {
+        RawScoringError::EmptyQuery => RawScoringError::EmptyQuery,
+        RawScoringError::EmptyIndex => RawScoringError::EmptyIndex,
+        RawScoringError::MissingCorpusStats(term_id) => {
+            RawScoringError::MissingCorpusStats(term_id)
+        }
+        RawScoringError::Source(source) => match source {},
+    }
 }
 
 fn retrieve_bm25_raw_with_stats_and_search_stats<S>(
@@ -1610,6 +1787,7 @@ mod tests {
     use super::*;
     use crate::bm25::InvertedIndex;
     use postings::raw::{write_u64_u32_segment, RawDocument};
+    use postings::PostingsIndex;
 
     fn build_raw_docs() -> Vec<Vec<(RawTermId, u32)>> {
         vec![
@@ -2179,6 +2357,65 @@ mod tests {
                 "doc {raw_doc}: raw={raw_score}, memory={memory_score}"
             );
         }
+    }
+
+    #[test]
+    fn raw_bm25_files_and_live_index_match_in_memory_index_with_global_stats() {
+        let sealed = [
+            (1, vec![(10, 3), (20, 1)]),
+            (2, vec![(20, 5)]),
+            (3, vec![(30, 1)]),
+        ];
+        let live = [
+            (10, vec![(10, 1), (30, 7)]),
+            (11, vec![(20, 2), (40, 10)]),
+            (12, vec![(10, 4), (40, 1)]),
+        ];
+        let mut index = InvertedIndex::new();
+        let mut live_index = PostingsIndex::new();
+        for (doc_id, terms) in sealed.iter().chain(live.iter()) {
+            add_raw_doc_to_memory_index(&mut index, *doc_id, terms);
+            if *doc_id >= 10 {
+                live_index.add_weighted_document(*doc_id, terms).unwrap();
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let sealed_path = dir.path().join("sealed.raw");
+        std::fs::write(&sealed_path, build_raw_bytes_with_doc_ids(&sealed)).unwrap();
+        let mut sealed_segment = RawSegmentFile::open(&sealed_path).unwrap();
+        let query = vec![10, 30, 10, 40];
+        let mut segments = [&mut sealed_segment];
+
+        let stats =
+            RawBm25CorpusStats::from_raw_files_and_index(&mut segments, &live_index, &query)
+                .unwrap();
+        assert_eq!(stats.num_docs(), 6);
+        assert_eq!(stats.df(10), Some(3));
+        assert_eq!(stats.df(30), Some(2));
+        assert_eq!(stats.df(40), Some(2));
+
+        let got = retrieve_bm25_raw_files_and_index_with_stats(
+            &mut segments,
+            &live_index,
+            &query,
+            10,
+            Bm25Params::default(),
+            &stats,
+        )
+        .unwrap();
+        let auto_stats_got = retrieve_bm25_raw_files_and_index(
+            &mut segments,
+            &live_index,
+            &query,
+            10,
+            Bm25Params::default(),
+        )
+        .unwrap();
+        let expected = raw_bm25_memory_hits(&index, &query, 10, Bm25Params::default());
+
+        assert_hits_close(&expected, &got, "raw files plus live shard BM25");
+        assert_eq!(auto_stats_got, got);
     }
 
     #[test]
