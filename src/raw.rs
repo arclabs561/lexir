@@ -295,6 +295,10 @@ impl RawSegmentRead for RawSegment<'_> {
     ) -> Result<(), Self::Error> {
         RawSegment::for_each_posting_with_document_len(self, term_id, visit)
     }
+
+    fn doc_id_range(&mut self) -> Result<Option<(DocId, DocId)>, Self::Error> {
+        RawSegment::doc_id_range(self)
+    }
 }
 
 impl RawSegmentRead for RawSegmentFile {
@@ -334,6 +338,10 @@ impl RawSegmentRead for RawSegmentFile {
         visit: impl FnMut(DocId, u32, u32),
     ) -> Result<(), Self::Error> {
         RawSegmentFile::for_each_posting_with_document_len(self, term_id, visit)
+    }
+
+    fn doc_id_range(&mut self) -> Result<Option<(DocId, DocId)>, Self::Error> {
+        Ok(RawSegmentFile::doc_id_range(self)?)
     }
 }
 

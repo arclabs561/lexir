@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Changed raw BM25 dense score and document-length buffers to use the segment's
   document-id span instead of allocating from zero to the maximum document id.
+- Changed raw BM25 range planning to use postings' raw segment `doc_id_range`
+  API instead of deriving the same span by scanning document lengths.
 
 ## [0.2.3] - 2026-07-03
 
