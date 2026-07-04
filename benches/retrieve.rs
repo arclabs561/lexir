@@ -159,6 +159,46 @@ fn build_prunable_raw_files() -> (
 }
 
 #[cfg(feature = "raw-segment")]
+fn build_live_prunable_raw_files() -> (
+    tempfile::TempDir,
+    Vec<RawSegmentFile>,
+    PostingsIndex<RawTermId, u32>,
+    lexir::raw::RawBm25CorpusStats,
+    Vec<RawTermId>,
+) {
+    const QUERY_TERM: RawTermId = 7;
+    const COLD_SEGMENTS: usize = 64;
+    const COLD_DOCS_PER_SEGMENT: usize = 64;
+    const LIVE_DOCS: usize = 10;
+
+    let dir = tempfile::tempdir().unwrap();
+    let query = vec![QUERY_TERM];
+    let mut segments = Vec::new();
+    for segment_id in 0..COLD_SEGMENTS {
+        let cold_docs = vec![vec![(QUERY_TERM, 1), (999, 99)]; COLD_DOCS_PER_SEGMENT];
+        segments.push(write_raw_file(
+            &dir,
+            &format!("live-prune-cold-{segment_id}.raw"),
+            &cold_docs,
+            (segment_id * COLD_DOCS_PER_SEGMENT) as u32,
+        ));
+    }
+
+    let live_docs = vec![vec![(QUERY_TERM, 20)]; LIVE_DOCS];
+    let live_index = build_raw_live_index(&live_docs, 1_000_000);
+    let mut segment_refs: Vec<_> = segments.iter_mut().collect();
+    let stats = lexir::raw::RawBm25CorpusStats::from_raw_files_and_index(
+        &mut segment_refs,
+        &live_index,
+        &query,
+    )
+    .unwrap();
+    drop(segment_refs);
+
+    (dir, segments, live_index, stats, query)
+}
+
+#[cfg(feature = "raw-segment")]
 fn build_partitioned_raw_files() -> (
     tempfile::TempDir,
     Vec<RawSegmentFile>,
@@ -601,6 +641,29 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
             });
         },
     );
+    let (
+        _live_prune_dir,
+        mut live_prune_segments,
+        live_prune_index,
+        live_prune_stats,
+        live_prune_query,
+    ) = build_live_prunable_raw_files();
+    group.bench_function("files_and_live_index_live_prunes_64", |b| {
+        let mut segments: Vec<_> = live_prune_segments.iter_mut().collect();
+        b.iter(|| {
+            black_box(
+                lexir::raw::retrieve_bm25_raw_files_and_index_with_stats(
+                    black_box(segments.as_mut_slice()),
+                    black_box(&live_prune_index),
+                    black_box(live_prune_query.as_slice()),
+                    10,
+                    params,
+                    black_box(&live_prune_stats),
+                )
+                .unwrap(),
+            );
+        });
+    });
 
     let (_prunable_dir, mut prunable_segments, prunable_stats, prunable_query) =
         build_prunable_raw_files();

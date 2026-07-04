@@ -111,7 +111,8 @@ average document length. The multi-file path orders segments by a conservative
 BM25 upper bound and can skip segments that cannot enter the current top-k.
 For streaming ingestion, `retrieve_bm25_raw_files_and_index` searches sealed
 raw segment files plus one live `postings::PostingsIndex<u64, u32>` shard with
-shared BM25 corpus stats.
+shared BM25 corpus stats, scoring the live shard first so its top-k threshold
+can skip low-bound sealed files.
 Use `retrieve_bm25_raw_file_with_search_stats` for single-segment traversal
 diagnostics and `retrieve_bm25_raw_files_with_search_stats` for searched/pruned
 segment counts. `RawBm25CorpusStats::from_raw_files_all_terms` builds reusable

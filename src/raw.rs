@@ -806,8 +806,15 @@ pub fn retrieve_bm25_raw_files_with_stats(
     params: Bm25Params,
     stats: &RawBm25CorpusStats,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
-    retrieve_bm25_raw_files_with_search_stats(segments, query_terms, k, params, stats)
-        .map(|result| result.hits)
+    retrieve_bm25_raw_files_with_search_stats_seeded(
+        segments,
+        query_terms,
+        k,
+        params,
+        stats,
+        Vec::new(),
+    )
+    .map(|result| result.hits)
 }
 
 /// Retrieve top-k documents across file-backed raw segments and one live
@@ -847,16 +854,21 @@ pub fn retrieve_bm25_raw_files_and_index_with_stats(
     params: Bm25Params,
     stats: &RawBm25CorpusStats,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
-    let mut candidates =
-        retrieve_bm25_raw_files_with_stats(segments, query_terms, k, params, stats)?;
-    if live_index.num_docs() > 0 {
+    let mut live_hits = Vec::new();
+    if live_index.num_docs() > 0 && k > 0 {
         let mut live_reader = live_index;
-        let live_hits =
-            retrieve_bm25_raw_with_stats(&mut live_reader, query_terms, k, params, stats)
-                .map_err(raw_infallible_error)?;
-        candidates.extend(live_hits);
+        live_hits = retrieve_bm25_raw_with_stats(&mut live_reader, query_terms, k, params, stats)
+            .map_err(raw_infallible_error)?;
     }
-    Ok(top_k_positive_scored_docs(candidates, k))
+    retrieve_bm25_raw_files_with_search_stats_seeded(
+        segments,
+        query_terms,
+        k,
+        params,
+        stats,
+        live_hits,
+    )
+    .map(|result| result.hits)
 }
 
 /// Retrieve top-k documents across file-backed raw segments and return
@@ -871,6 +883,24 @@ pub fn retrieve_bm25_raw_files_with_search_stats(
     k: usize,
     params: Bm25Params,
     stats: &RawBm25CorpusStats,
+) -> Result<RawBm25SearchResult, RawScoringError<RawSegmentFileError>> {
+    retrieve_bm25_raw_files_with_search_stats_seeded(
+        segments,
+        query_terms,
+        k,
+        params,
+        stats,
+        Vec::new(),
+    )
+}
+
+fn retrieve_bm25_raw_files_with_search_stats_seeded(
+    segments: &mut [&mut RawSegmentFile],
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+    mut candidates: Vec<(DocId, f32)>,
 ) -> Result<RawBm25SearchResult, RawScoringError<RawSegmentFileError>> {
     if query_terms.is_empty() {
         return Err(RawScoringError::EmptyQuery);
@@ -897,8 +927,11 @@ pub fn retrieve_bm25_raw_files_with_search_stats(
         });
     }
 
+    if !candidates.is_empty() {
+        candidates = top_k_positive_scored_docs(candidates, k);
+    }
+    candidates.reserve(k.saturating_mul(segments.len()));
     let terms = raw_term_multiplicities(query_terms);
-    let mut candidates = Vec::with_capacity(k.saturating_mul(segments.len()));
     let mut order = Vec::with_capacity(segments.len());
     for (index, segment) in segments.iter().enumerate() {
         let mut upper_bound = 0.0;
@@ -928,7 +961,11 @@ pub fn retrieve_bm25_raw_files_with_search_stats(
     }
     order.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
 
-    let mut threshold = 0.0;
+    let mut threshold = if candidates.len() >= k {
+        candidates.last().map_or(0.0, |(_, score)| *score)
+    } else {
+        0.0
+    };
     for (index, upper_bound) in order {
         if candidates.len() >= k && upper_bound < threshold {
             search_stats.segments_pruned += 1;
@@ -2483,6 +2520,51 @@ mod tests {
         assert_hits_close(&expected, &got, "raw files plus live shard BM25");
         assert_eq!(auto_stats_got, got);
         assert_eq!(all_stats_got, got);
+    }
+
+    #[test]
+    fn raw_bm25_files_and_live_index_use_live_threshold_to_skip_low_bound_files() {
+        const TERM: RawTermId = 7;
+
+        let sealed = vec![(1, vec![(TERM, 1), (99, 99)])];
+        let mut sealed_bytes = build_raw_bytes_with_doc_ids(&sealed);
+        let dir = tempfile::tempdir().unwrap();
+        let good_path = dir.path().join("sealed-good.raw");
+        std::fs::write(&good_path, &sealed_bytes).unwrap();
+        let good_segment = RawSegmentFile::open(&good_path).unwrap();
+        let block = good_segment.posting_blocks(TERM).unwrap()[0];
+        sealed_bytes[block.postings_offset() as usize] ^= 0xFF;
+
+        let corrupted_path = dir.path().join("sealed-corrupted.raw");
+        std::fs::write(&corrupted_path, sealed_bytes).unwrap();
+        let mut corrupted_segment = RawSegmentFile::open(&corrupted_path).unwrap();
+
+        let mut live_index = PostingsIndex::new();
+        for doc_id in 100..110 {
+            live_index
+                .add_weighted_document(doc_id, &[(TERM, 20)])
+                .unwrap();
+        }
+
+        let query = vec![TERM];
+        let params = Bm25Params::default();
+        let mut segments = [&mut corrupted_segment];
+        let stats =
+            RawBm25CorpusStats::from_raw_files_and_index(&mut segments, &live_index, &query)
+                .unwrap();
+
+        let hits = retrieve_bm25_raw_files_and_index_with_stats(
+            &mut segments,
+            &live_index,
+            &query,
+            10,
+            params,
+            &stats,
+        )
+        .unwrap();
+
+        assert_eq!(hits.len(), 10);
+        assert!(hits.iter().all(|(doc_id, _)| *doc_id >= 100));
     }
 
     #[test]

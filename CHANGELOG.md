@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Changed `retrieve_bm25_raw_files_and_index_with_stats` to score the live raw
+  postings shard before sealed raw files, allowing the live top-k threshold to
+  skip low-bound sealed files. Added regression and benchmark coverage for that
+  live-dominant mixed search shape.
+
 ## [0.2.7] - 2026-07-04
 
 ### Added
