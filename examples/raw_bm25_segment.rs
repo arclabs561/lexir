@@ -45,12 +45,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     file.sync_all()?;
     drop(file);
 
-    let query = dictionary.encode_query(["neural", "search"]);
+    let dictionary_terms: Vec<_> = dictionary
+        .terms()
+        .map(|(_, term)| term.to_owned())
+        .collect();
+    let query_dictionary = RawTermDictionary::from_terms_in_id_order(&dictionary_terms)?;
+    let query = query_dictionary.encode_query(["neural", "search"]);
     let mut segment = RawSegmentFile::open(&path)?;
     let hits = retrieve_bm25_raw_file(&mut segment, &query, 3, Bm25Params::default())?;
 
     println!("dictionary:");
-    for (term_id, term) in dictionary.terms() {
+    for (term_id, term) in query_dictionary.terms() {
         println!("  {term_id}: {term}");
     }
     println!("query ids: {query:?}");
