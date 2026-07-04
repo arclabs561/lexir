@@ -7,10 +7,10 @@ use std::io::Write;
 
 use lexir::bm25::Bm25Params;
 use lexir::raw::{
-    retrieve_bm25_raw_files_and_index_with_diagnostics, RawBm25CorpusStats, RawTermDictionary,
+    retrieve_bm25_raw_files_and_index_with_diagnostics, RawBm25CorpusStats, RawBm25LiveShard,
+    RawTermDictionary,
 };
-use postings::raw::{write_u64_u32_segment_from_index_seekable_to, RawSegmentFile};
-use postings::PostingsIndex;
+use postings::raw::RawSegmentFile;
 
 const SEAL_AFTER_DOCS: usize = 3;
 
@@ -54,14 +54,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     let dir = tempfile::tempdir()?;
-    let mut dictionary = RawTermDictionary::new();
-    let mut live = PostingsIndex::new();
+    let mut ingest = RawBm25LiveShard::new();
     let mut live_docs = 0usize;
     let mut sealed_paths = Vec::new();
 
     for document in &corpus {
-        let terms = dictionary.encode_document(document.terms)?;
-        live.add_weighted_document(document.id, &terms)?;
+        ingest.add_document(document.id, document.terms)?;
         live_docs += 1;
 
         if live_docs == SEAL_AFTER_DOCS {
@@ -69,18 +67,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .path()
                 .join(format!("generation-{}.raw", sealed_paths.len()));
             let mut file = std::fs::File::create(&path)?;
-            write_u64_u32_segment_from_index_seekable_to(&live, &mut file)?;
+            ingest.seal_live_to(&mut file)?;
             file.sync_all()?;
             drop(file);
 
             sealed_paths.push(path);
-            live = PostingsIndex::new();
+            ingest.clear_live();
             live_docs = 0;
         }
     }
 
     let dictionary_path = dir.path().join("dictionary.txt");
-    write_dictionary_sidecar(&dictionary_path, &dictionary)?;
+    write_dictionary_sidecar(&dictionary_path, ingest.dictionary())?;
 
     let persisted_terms = std::fs::read_to_string(&dictionary_path)?;
     let loaded_dictionary = RawTermDictionary::from_terms_in_id_order(persisted_terms.lines())?;
@@ -90,10 +88,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(RawSegmentFile::open)
         .collect::<Result<Vec<_>, _>>()?;
     let mut segment_refs: Vec<_> = sealed_segments.iter_mut().collect();
-    let stats = RawBm25CorpusStats::from_raw_files_and_index(&mut segment_refs, &live, &query)?;
+    let stats = RawBm25CorpusStats::from_raw_files_and_index(
+        &mut segment_refs,
+        ingest.live_index(),
+        &query,
+    )?;
     let result = retrieve_bm25_raw_files_and_index_with_diagnostics(
         &mut segment_refs,
-        &live,
+        ingest.live_index(),
         &query,
         5,
         Bm25Params::default(),

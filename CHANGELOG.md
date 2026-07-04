@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multi-file raw segments, so exact filters can feed out-of-core BM25 ranking.
 - Added Criterion benchmark cases for in-memory and raw-file BM25 over
   caller-supplied candidate doc ids.
+- Added `RawBm25LiveShard`, a small ingestion helper that owns a raw term
+  dictionary plus one live numeric postings shard and seals it to a
+  caller-provided raw segment writer.
 - Added a `raw_bm25_generation` example showing streaming lexical ingestion
   into raw files plus one live shard, with a persisted term-id dictionary
   sidecar.

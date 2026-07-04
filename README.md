@@ -159,6 +159,10 @@ term ids. `insert` assigns ids in insertion order; `from_terms_sorted` assigns
 ids from sorted unique terms for reproducible offline builds. Export
 `RawTermDictionary::terms` as a term-id-ordered sidecar and reload it with
 `RawTermDictionary::from_terms_in_id_order`.
+`RawBm25LiveShard` pairs that dictionary with one bounded live
+`postings::PostingsIndex<u64, u32>` shard, can add token streams, encode
+queries, and seal the live shard to a caller-provided raw segment writer. It
+does not own paths, commits, durable publication, retention, or compaction.
 
 `cargo run --example raw_bm25_generation --features raw-segment` shows the
 streaming ingestion pattern: encode lexical documents into a live numeric shard,

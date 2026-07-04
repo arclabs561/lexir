@@ -9,13 +9,15 @@
 use crate::bm25::{bm25_tf_score, Bm25Params, Bm25Variant};
 use crate::ranking::top_k_positive_scored_docs;
 use postings::raw::{
-    RawPostingBlockMeta, RawSegment, RawSegmentFile, RawSegmentFileError, RawTermId,
+    write_u64_u32_segment_from_index_seekable_to, RawPostingBlockMeta, RawSegment, RawSegmentFile,
+    RawSegmentFileError, RawSegmentWriteError, RawTermId,
 };
 use postings::{DocId, PostingsIndex};
 use rankfns::bm25_idf_plus1;
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::fmt;
+use std::io::{Seek, Write};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -30,6 +32,21 @@ pub enum RawTermDictionaryError {
     /// A persisted raw term-id dictionary listed the same lexical term twice.
     #[error("duplicate raw dictionary term at term id {term_id}")]
     DuplicateTerm { term_id: RawTermId },
+}
+
+/// Errors returned by [`RawBm25LiveShard`].
+#[non_exhaustive]
+#[derive(Debug, Error)]
+pub enum RawBm25LiveShardError {
+    /// Term dictionary encoding failed.
+    #[error(transparent)]
+    Dictionary(#[from] RawTermDictionaryError),
+    /// Live postings mutation failed.
+    #[error(transparent)]
+    Postings(#[from] postings::Error),
+    /// Raw segment sealing failed.
+    #[error(transparent)]
+    SegmentWrite(#[from] RawSegmentWriteError),
 }
 
 /// In-process mapping from lexical terms to `postings::raw` term ids.
@@ -181,6 +198,112 @@ impl RawTermDictionary {
             .into_iter()
             .filter_map(|term| self.id(term.as_ref()))
             .collect()
+    }
+}
+
+/// Bounded live shard for raw BM25 ingestion.
+///
+/// This helper owns only lexical-term encoding and the current in-memory raw
+/// postings shard. It does not own file paths, manifests, durable publication,
+/// deletes for sealed generations, retention, or compaction.
+#[derive(Debug, Default)]
+pub struct RawBm25LiveShard {
+    dictionary: RawTermDictionary,
+    live: PostingsIndex<RawTermId, u32>,
+}
+
+impl RawBm25LiveShard {
+    /// Create an empty live shard with an empty insertion-ordered dictionary.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create an empty live shard using an existing dictionary.
+    pub fn with_dictionary(dictionary: RawTermDictionary) -> Self {
+        Self {
+            dictionary,
+            live: PostingsIndex::new(),
+        }
+    }
+
+    /// Borrow the live shard dictionary.
+    pub fn dictionary(&self) -> &RawTermDictionary {
+        &self.dictionary
+    }
+
+    /// Borrow the live postings shard.
+    pub fn live_index(&self) -> &PostingsIndex<RawTermId, u32> {
+        &self.live
+    }
+
+    /// Consume the helper and return its dictionary plus live postings shard.
+    pub fn into_parts(self) -> (RawTermDictionary, PostingsIndex<RawTermId, u32>) {
+        (self.dictionary, self.live)
+    }
+
+    /// Count live documents currently buffered in the shard.
+    pub fn live_doc_count(&self) -> u32 {
+        self.live.num_docs()
+    }
+
+    /// Return true when no live documents are currently buffered.
+    pub fn is_live_empty(&self) -> bool {
+        self.live.num_docs() == 0
+    }
+
+    /// Add a tokenized document to the live shard.
+    ///
+    /// Unknown terms are inserted into the dictionary. Duplicate document ids
+    /// return an error; call [`Self::delete_live_document`] first to model an
+    /// update inside the live shard.
+    pub fn add_document<I, T>(
+        &mut self,
+        doc_id: DocId,
+        terms: I,
+    ) -> Result<(), RawBm25LiveShardError>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+    {
+        let encoded = self.dictionary.encode_document(terms)?;
+        self.live.add_weighted_document(doc_id, &encoded)?;
+        Ok(())
+    }
+
+    /// Delete a document from the current live shard.
+    ///
+    /// Deletes for already-sealed raw files remain a caller or storage-layer
+    /// responsibility.
+    pub fn delete_live_document(&mut self, doc_id: DocId) -> bool {
+        self.live.delete_document(doc_id)
+    }
+
+    /// Encode query terms using the shard dictionary.
+    ///
+    /// Unknown terms are omitted; duplicate known terms are preserved.
+    pub fn encode_query<I, T>(&self, terms: I) -> Vec<RawTermId>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+    {
+        self.dictionary.encode_query(terms)
+    }
+
+    /// Seal the current live shard to a seekable raw segment writer.
+    ///
+    /// This does not clear the live shard. Call [`Self::clear_live`] only after
+    /// the caller's durable write and publication policy has succeeded.
+    pub fn seal_live_to<W>(&self, writer: &mut W) -> Result<(), RawBm25LiveShardError>
+    where
+        W: Write + Seek + ?Sized,
+    {
+        write_u64_u32_segment_from_index_seekable_to(&self.live, writer)?;
+        Ok(())
+    }
+
+    /// Clear the current live shard while preserving the dictionary.
+    pub fn clear_live(&mut self) {
+        self.live = PostingsIndex::new();
     }
 }
 
@@ -2523,6 +2646,45 @@ mod tests {
 
         let hits = retrieve_bm25_raw_segment(&segment, &query, 3, Bm25Params::default()).unwrap();
         assert_eq!(hits.first().map(|(doc_id, _)| *doc_id), Some(0));
+    }
+
+    #[test]
+    fn raw_bm25_live_shard_seals_searchable_segment() {
+        let mut shard = RawBm25LiveShard::new();
+        shard
+            .add_document(10, ["rust", "search", "search"])
+            .unwrap();
+        shard.add_document(11, ["rust"]).unwrap();
+        shard.add_document(12, ["other"]).unwrap();
+
+        let query = shard.encode_query(["search", "missing", "search"]);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        shard.seal_live_to(&mut bytes).unwrap();
+
+        let bytes = bytes.into_inner();
+        let segment = RawSegment::open(&bytes).unwrap();
+        let hits = retrieve_bm25_raw_segment(&segment, &query, 3, Bm25Params::default()).unwrap();
+
+        assert_eq!(hits.first().map(|(doc_id, _)| *doc_id), Some(10));
+        assert_eq!(shard.live_doc_count(), 3);
+    }
+
+    #[test]
+    fn raw_bm25_live_shard_clear_preserves_dictionary() {
+        let mut shard = RawBm25LiveShard::new();
+        shard.add_document(1, ["alpha", "beta"]).unwrap();
+        let alpha = shard.dictionary().id("alpha");
+
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        shard.seal_live_to(&mut bytes).unwrap();
+        shard.clear_live();
+
+        assert!(shard.is_live_empty());
+        assert_eq!(shard.dictionary().id("alpha"), alpha);
+        assert_eq!(
+            shard.encode_query(["alpha", "missing"]),
+            alpha.into_iter().collect::<Vec<_>>()
+        );
     }
 
     #[test]
