@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/lexir/badge.svg)](https://docs.rs/lexir)
 [![CI](https://github.com/arclabs561/lexir/actions/workflows/ci.yml/badge.svg)](https://github.com/arclabs561/lexir/actions/workflows/ci.yml)
 
-Lexical IR on top of postings lists
+Lexical scoring over postings lists.
 
 **Status**: experimental. Published on `crates.io`; the API may still shift.
 
@@ -16,6 +16,22 @@ Lexical IR on top of postings lists
 ## What it is
 
 `lexir` is the scoring/ranking layer. Candidate generation and storage live in `postings`.
+
+## Storage model
+
+`InvertedIndex` is the in-memory path: postings and corpus statistics live in
+RAM, with optional save/load support through `persistence`.
+
+The `raw-segment` feature is the file-backed path for larger immutable segment
+sets. `lexir` scores `postings::raw` segment files directly, keeps only fixed
+segment directories and BM25 statistics in memory, and reads posting payloads
+from the segment files during search. Multi-segment raw search treats the files
+as one corpus by sharing corpus-level IDF and average document length, then
+merges per-segment top-k results with a conservative segment-pruning bound.
+
+`lexir` does not own tokenization, term-id assignment, raw segment commit
+lifecycle, deletes, or segment merges. Those stay with the caller or a storage
+layer above `postings::raw`.
 
 ## Building
 

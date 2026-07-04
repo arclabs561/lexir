@@ -2,7 +2,7 @@
 # https://github.com/repository-settings/app
 
 repository:
-  description: "Lexical IR on top of postings lists"
+  description: "Lexical scoring over postings lists"
   homepage: "https://docs.rs/lexir"
   private: false
   has_issues: true
