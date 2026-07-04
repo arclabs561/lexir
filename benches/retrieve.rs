@@ -126,6 +126,11 @@ fn build_raw_live_index(
 }
 
 #[cfg(feature = "raw-segment")]
+fn visible_for_filter_bench(doc_id: u32) -> bool {
+    doc_id % 16 != 0
+}
+
+#[cfg(feature = "raw-segment")]
 fn build_prunable_raw_files() -> (
     tempfile::TempDir,
     Vec<RawSegmentFile>,
@@ -481,6 +486,51 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
                         10,
                         params,
                         black_box(&candidate_stats),
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new("file_filtered_stats_build", candidate_query.len()),
+        &candidate_query,
+        |b, query| {
+            b.iter(|| {
+                let mut segments = [&mut segment];
+                black_box(
+                    lexir::raw::RawBm25CorpusStats::from_raw_files_filtered(
+                        black_box(&mut segments),
+                        black_box(query.as_slice()),
+                        visible_for_filter_bench,
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+    let filtered_stats = {
+        let mut segments = [&mut segment];
+        lexir::raw::RawBm25CorpusStats::from_raw_files_filtered(
+            &mut segments,
+            &candidate_query,
+            visible_for_filter_bench,
+        )
+        .unwrap()
+    };
+    group.bench_with_input(
+        BenchmarkId::new("file_filtered_terms", candidate_query.len()),
+        &candidate_query,
+        |b, query| {
+            b.iter(|| {
+                black_box(
+                    lexir::raw::retrieve_bm25_raw_file_filtered_with_stats(
+                        black_box(&mut segment),
+                        black_box(query.as_slice()),
+                        10,
+                        params,
+                        black_box(&filtered_stats),
+                        visible_for_filter_bench,
                     )
                     .unwrap(),
                 );

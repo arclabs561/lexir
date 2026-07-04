@@ -531,6 +531,69 @@ impl RawBm25CorpusStats {
         })
     }
 
+    /// Build query-scoped corpus stats from file-backed raw segments after
+    /// applying a caller-owned document visibility filter.
+    ///
+    /// Use this when a lifecycle layer has tombstones or newer-version masks for
+    /// sealed raw files. Unlike [`Self::from_raw_files`], this reads query-term
+    /// postings payloads so document frequency, document count, and average
+    /// length reflect only visible documents.
+    pub fn from_raw_files_filtered<F>(
+        segments: &mut [&mut RawSegmentFile],
+        query_terms: &[RawTermId],
+        is_visible: F,
+    ) -> Result<Self, RawScoringError<RawSegmentFileError>>
+    where
+        F: Fn(DocId) -> bool,
+    {
+        if query_terms.is_empty() {
+            return Err(RawScoringError::EmptyQuery);
+        }
+
+        let terms = raw_term_multiplicities(query_terms);
+        let mut num_docs = 0u32;
+        let mut total_doc_len = 0.0f64;
+        let mut dfs = HashMap::with_capacity(terms.len());
+        for term in &terms {
+            dfs.insert(term.term_id, 0u32);
+        }
+
+        for segment in segments.iter_mut() {
+            segment
+                .for_each_document_len(|doc_id, doc_len| {
+                    if is_visible(doc_id) {
+                        num_docs = num_docs.saturating_add(1);
+                        total_doc_len += doc_len as f64;
+                    }
+                })
+                .map_err(RawScoringError::Source)?;
+
+            for term in &terms {
+                let mut live_df = 0u32;
+                segment
+                    .for_each_posting_with_document_len(term.term_id, |doc_id, _, _| {
+                        if is_visible(doc_id) {
+                            live_df = live_df.saturating_add(1);
+                        }
+                    })
+                    .map_err(RawScoringError::Source)?;
+                if let Some(total_df) = dfs.get_mut(&term.term_id) {
+                    *total_df = total_df.saturating_add(live_df);
+                }
+            }
+        }
+
+        if num_docs == 0 {
+            return Err(RawScoringError::EmptyIndex);
+        }
+
+        Ok(Self {
+            num_docs,
+            avg_doc_len: (total_doc_len / num_docs as f64) as f32,
+            dfs,
+        })
+    }
+
     /// Build query-scoped corpus stats from file-backed raw segments and one
     /// live in-memory raw postings shard.
     ///
@@ -697,6 +760,55 @@ impl RawBm25CorpusStats {
         Ok(Self {
             num_docs,
             avg_doc_len: segment.avg_doc_len(),
+            dfs,
+        })
+    }
+
+    fn from_reader_filtered<S, F>(
+        segment: &mut S,
+        query_terms: &[RawTermId],
+        is_visible: &F,
+    ) -> Result<Self, RawScoringError<S::Error>>
+    where
+        S: RawSegmentRead,
+        F: Fn(DocId) -> bool,
+    {
+        if query_terms.is_empty() {
+            return Err(RawScoringError::EmptyQuery);
+        }
+
+        let mut num_docs = 0u32;
+        let mut total_doc_len = 0.0f64;
+        segment
+            .for_each_document_len(|doc_id, doc_len| {
+                if is_visible(doc_id) {
+                    num_docs = num_docs.saturating_add(1);
+                    total_doc_len += doc_len as f64;
+                }
+            })
+            .map_err(RawScoringError::Source)?;
+
+        if num_docs == 0 {
+            return Err(RawScoringError::EmptyIndex);
+        }
+
+        let terms = raw_term_multiplicities(query_terms);
+        let mut dfs = HashMap::with_capacity(terms.len());
+        for term in terms {
+            let mut live_df = 0u32;
+            segment
+                .for_each_posting_with_document_len(term.term_id, |doc_id, _, _| {
+                    if is_visible(doc_id) {
+                        live_df = live_df.saturating_add(1);
+                    }
+                })
+                .map_err(RawScoringError::Source)?;
+            dfs.insert(term.term_id, live_df);
+        }
+
+        Ok(Self {
+            num_docs,
+            avg_doc_len: (total_doc_len / num_docs as f64) as f32,
             dfs,
         })
     }
@@ -963,6 +1075,44 @@ pub fn retrieve_bm25_raw_segment_candidates_with_stats(
     )
 }
 
+/// Retrieve top-k documents using BM25 over a byte-backed raw segment after
+/// applying a caller-owned document visibility filter.
+///
+/// This is the composition point for lifecycle layers that expose tombstones or
+/// newer-version masks. Filtered documents are skipped before BM25 statistics,
+/// scoring, and top-k thresholds are computed.
+pub fn retrieve_bm25_raw_segment_filtered<F>(
+    segment: &RawSegment<'_>,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    is_visible: F,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<postings::raw::Error>>
+where
+    F: Fn(DocId) -> bool,
+{
+    let mut segment = *segment;
+    let stats = RawBm25CorpusStats::from_reader_filtered(&mut segment, query_terms, &is_visible)?;
+    retrieve_bm25_raw_filtered_with_stats(&mut segment, query_terms, k, params, &stats, &is_visible)
+}
+
+/// Retrieve top-k documents using BM25 over a byte-backed raw segment with
+/// caller-provided filtered corpus stats and a document visibility filter.
+pub fn retrieve_bm25_raw_segment_filtered_with_stats<F>(
+    segment: &RawSegment<'_>,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+    is_visible: F,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<postings::raw::Error>>
+where
+    F: Fn(DocId) -> bool,
+{
+    let mut segment = *segment;
+    retrieve_bm25_raw_filtered_with_stats(&mut segment, query_terms, k, params, stats, &is_visible)
+}
+
 /// Retrieve top-k documents using BM25 over a file-backed raw segment.
 ///
 /// The fixed segment directories stay in memory; posting payloads are read from
@@ -1016,6 +1166,42 @@ pub fn retrieve_bm25_raw_file_candidates_with_stats(
     stats: &RawBm25CorpusStats,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
     retrieve_bm25_raw_candidates_with_stats(segment, query_terms, candidate_docs, k, params, stats)
+}
+
+/// Retrieve top-k documents using BM25 over a file-backed raw segment after
+/// applying a caller-owned document visibility filter.
+///
+/// Use this with a tombstone/newer-version predicate from the lifecycle layer.
+/// Filtered documents are skipped before BM25 statistics, scoring, and top-k
+/// thresholds are computed.
+pub fn retrieve_bm25_raw_file_filtered<F>(
+    segment: &mut RawSegmentFile,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    is_visible: F,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>>
+where
+    F: Fn(DocId) -> bool,
+{
+    let stats = RawBm25CorpusStats::from_reader_filtered(segment, query_terms, &is_visible)?;
+    retrieve_bm25_raw_filtered_with_stats(segment, query_terms, k, params, &stats, &is_visible)
+}
+
+/// Retrieve top-k documents using BM25 over a file-backed raw segment with
+/// caller-provided filtered corpus stats and a document visibility filter.
+pub fn retrieve_bm25_raw_file_filtered_with_stats<F>(
+    segment: &mut RawSegmentFile,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+    is_visible: F,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>>
+where
+    F: Fn(DocId) -> bool,
+{
+    retrieve_bm25_raw_filtered_with_stats(segment, query_terms, k, params, stats, &is_visible)
 }
 
 fn retrieve_bm25_raw_file_with_stats_min_score(
@@ -1170,6 +1356,59 @@ pub fn retrieve_bm25_raw_files_candidates_with_stats(
         )?);
     }
     Ok(top_k_positive_scored_docs(hits, k))
+}
+
+/// Retrieve top-k documents across file-backed raw segments after applying a
+/// caller-owned document visibility filter.
+///
+/// Segment document ids must already be globally unique. The visibility
+/// predicate is applied while building query-scoped BM25 stats and while
+/// scoring, so tombstoned docs cannot fill a local top-k slot before being
+/// filtered out.
+pub fn retrieve_bm25_raw_files_filtered<F>(
+    segments: &mut [&mut RawSegmentFile],
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    is_visible: F,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>>
+where
+    F: Fn(DocId) -> bool,
+{
+    let stats = RawBm25CorpusStats::from_raw_files_filtered(segments, query_terms, &is_visible)?;
+    retrieve_bm25_raw_files_filtered_with_stats(
+        segments,
+        query_terms,
+        k,
+        params,
+        &stats,
+        is_visible,
+    )
+}
+
+/// Retrieve top-k documents across file-backed raw segments using
+/// caller-provided filtered corpus stats and a document visibility filter.
+pub fn retrieve_bm25_raw_files_filtered_with_stats<F>(
+    segments: &mut [&mut RawSegmentFile],
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+    is_visible: F,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>>
+where
+    F: Fn(DocId) -> bool,
+{
+    retrieve_bm25_raw_files_with_diagnostics_seeded_filtered(
+        segments,
+        query_terms,
+        k,
+        params,
+        stats,
+        Vec::new(),
+        &is_visible,
+    )
+    .map(|result| result.hits)
 }
 
 /// Retrieve top-k documents across file-backed raw segments and one live
@@ -1405,6 +1644,113 @@ fn retrieve_bm25_raw_files_with_diagnostics_seeded(
     })
 }
 
+fn retrieve_bm25_raw_files_with_diagnostics_seeded_filtered<F>(
+    segments: &mut [&mut RawSegmentFile],
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+    mut candidates: Vec<(DocId, f32)>,
+    is_visible: &F,
+) -> Result<RawBm25DiagnosticSearchResult, RawScoringError<RawSegmentFileError>>
+where
+    F: Fn(DocId) -> bool,
+{
+    if query_terms.is_empty() {
+        return Err(RawScoringError::EmptyQuery);
+    }
+    if stats.num_docs() == 0 {
+        return Err(RawScoringError::EmptyIndex);
+    }
+    let mut diagnostics = RawBm25SearchDiagnostics {
+        segments: RawBm25SearchStats {
+            segments_seen: segments.len(),
+            ..RawBm25SearchStats::default()
+        },
+        ..RawBm25SearchDiagnostics::default()
+    };
+    if k == 0 {
+        return Ok(RawBm25DiagnosticSearchResult {
+            hits: Vec::new(),
+            diagnostics,
+        });
+    }
+
+    let avg_doc_len = stats.avg_doc_len();
+    if avg_doc_len <= 0.0 || !avg_doc_len.is_finite() {
+        return Ok(RawBm25DiagnosticSearchResult {
+            hits: Vec::new(),
+            diagnostics,
+        });
+    }
+
+    if !candidates.is_empty() {
+        candidates = top_k_positive_scored_docs(candidates, k);
+    }
+    candidates.reserve(k.saturating_mul(segments.len()));
+    let terms = raw_term_multiplicities(query_terms);
+    let mut order = Vec::with_capacity(segments.len());
+    for (index, segment) in segments.iter().enumerate() {
+        let mut upper_bound = 0.0;
+        for term in &terms {
+            let max_tf = segment
+                .max_weight(term.term_id)
+                .map_err(RawSegmentFileError::from)
+                .map_err(RawScoringError::Source)?;
+            if max_tf == 0 {
+                continue;
+            }
+            let corpus_df = stats
+                .df(term.term_id)
+                .ok_or(RawScoringError::MissingCorpusStats(term.term_id))?;
+            if corpus_df == 0 {
+                continue;
+            }
+            let idf = bm25_idf_plus1(stats.num_docs(), corpus_df);
+            upper_bound +=
+                idf * term.count as f32 * bm25_tf_upper_bound(max_tf as f32, avg_doc_len, params);
+        }
+        if upper_bound > 0.0 || !upper_bound.is_finite() {
+            order.push((index, upper_bound));
+        } else {
+            diagnostics.segments.segments_pruned += 1;
+        }
+    }
+    order.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+
+    let mut threshold = if candidates.len() >= k {
+        candidates.last().map_or(0.0, |(_, score)| *score)
+    } else {
+        0.0
+    };
+    for (index, upper_bound) in order {
+        if candidates.len() >= k && upper_bound < threshold {
+            diagnostics.segments.segments_pruned += 1;
+            continue;
+        }
+        diagnostics.segments.segments_scored += 1;
+        let result = retrieve_bm25_raw_filtered_with_stats_and_search_stats(
+            segments[index],
+            query_terms,
+            k,
+            params,
+            stats,
+            is_visible,
+        )?;
+        diagnostics.add_file_stats(result.stats);
+        candidates.extend(result.hits);
+        if candidates.len() >= k {
+            candidates = top_k_positive_scored_docs(candidates, k);
+            threshold = candidates.last().map_or(0.0, |(_, score)| *score);
+        }
+    }
+
+    Ok(RawBm25DiagnosticSearchResult {
+        hits: top_k_positive_scored_docs(candidates, k),
+        diagnostics,
+    })
+}
+
 fn retrieve_bm25_raw_with_stats<S>(
     segment: &mut S,
     query_terms: &[RawTermId],
@@ -1417,6 +1763,29 @@ where
 {
     retrieve_bm25_raw_with_stats_and_search_stats(segment, query_terms, k, params, stats)
         .map(|result| result.hits)
+}
+
+fn retrieve_bm25_raw_filtered_with_stats<S, F>(
+    segment: &mut S,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+    is_visible: &F,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<S::Error>>
+where
+    S: RawSegmentRead,
+    F: Fn(DocId) -> bool,
+{
+    retrieve_bm25_raw_filtered_with_stats_and_search_stats(
+        segment,
+        query_terms,
+        k,
+        params,
+        stats,
+        is_visible,
+    )
+    .map(|result| result.hits)
 }
 
 fn retrieve_bm25_raw_candidates_with_stats<S>(
@@ -1668,6 +2037,178 @@ where
                 .postings(term.term_id)
                 .map_err(RawScoringError::Source)?
             {
+                let doc_length = match doc_lengths.get(&doc_id) {
+                    Some(&len) => len,
+                    None => {
+                        let len = segment
+                            .document_len(doc_id)
+                            .map_err(RawScoringError::Source)?
+                            .unwrap_or(0);
+                        doc_lengths.insert(doc_id, len);
+                        len
+                    }
+                };
+                if doc_length == 0 {
+                    continue;
+                }
+
+                let tf_score = bm25_tf_score(tf as f32, doc_length as f32, avg_doc_len, params);
+                let contribution = term.idf * tf_score;
+                if contribution != 0.0 {
+                    let score = scores.entry(doc_id).or_insert(0.0);
+                    *score += contribution * term.count as f32;
+                }
+            }
+        }
+    }
+
+    Ok(RawBm25FileSearchResult {
+        hits: top_k_positive_scored_docs(scores, k),
+        stats: search_stats,
+    })
+}
+
+fn retrieve_bm25_raw_filtered_with_stats_and_search_stats<S, F>(
+    segment: &mut S,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+    is_visible: &F,
+) -> Result<RawBm25FileSearchResult, RawScoringError<S::Error>>
+where
+    S: RawSegmentRead,
+    F: Fn(DocId) -> bool,
+{
+    if query_terms.is_empty() {
+        return Err(RawScoringError::EmptyQuery);
+    }
+    if stats.num_docs() == 0 {
+        return Err(RawScoringError::EmptyIndex);
+    }
+    if k == 0 {
+        return Ok(RawBm25FileSearchResult {
+            hits: Vec::new(),
+            stats: RawBm25FileSearchStats::default(),
+        });
+    }
+    let avg_doc_len = stats.avg_doc_len();
+    if avg_doc_len <= 0.0 || !avg_doc_len.is_finite() {
+        return Ok(RawBm25FileSearchResult {
+            hits: Vec::new(),
+            stats: RawBm25FileSearchStats::default(),
+        });
+    }
+
+    let mut terms = raw_term_multiplicities(query_terms);
+    let mut touched_upper_bound = 0usize;
+    for term in &mut terms {
+        let df = segment.df(term.term_id).map_err(RawScoringError::Source)?;
+        if df == 0 {
+            continue;
+        }
+        let corpus_df = stats
+            .df(term.term_id)
+            .ok_or(RawScoringError::MissingCorpusStats(term.term_id))?;
+        if corpus_df == 0 {
+            continue;
+        }
+        term.idf = bm25_idf_plus1(stats.num_docs(), corpus_df);
+        if term.idf != 0.0 {
+            touched_upper_bound = touched_upper_bound.saturating_add(df as usize);
+        }
+    }
+    terms.retain(|term| term.idf != 0.0);
+    if terms.is_empty() {
+        return Ok(RawBm25FileSearchResult {
+            hits: Vec::new(),
+            stats: RawBm25FileSearchStats::default(),
+        });
+    }
+
+    if let Some((doc_base, slots)) =
+        dense_bm25_range(segment, touched_upper_bound).map_err(RawScoringError::Source)?
+    {
+        let stream_postings = should_stream_bm25(terms.len(), touched_upper_bound);
+        let dense_plan = DenseRawBm25Plan {
+            stream_postings,
+            doc_base,
+            slots,
+            prefill_doc_lengths: should_prefill_dense_doc_lengths(
+                segment.num_docs(),
+                touched_upper_bound,
+            ),
+        };
+        let stats = RawBm25FileSearchStats {
+            path: if stream_postings {
+                RawBm25FileSearchPath::DenseStream
+            } else {
+                RawBm25FileSearchPath::DenseCachedLengths
+            },
+            terms_scored: terms.len(),
+            touched_postings_upper_bound: touched_upper_bound,
+            dense_slots: slots,
+            ..RawBm25FileSearchStats::default()
+        };
+        return retrieve_bm25_raw_dense_filtered(
+            segment,
+            dense_plan,
+            terms,
+            k,
+            params,
+            avg_doc_len,
+            is_visible,
+        )
+        .map(|hits| RawBm25FileSearchResult { hits, stats });
+    }
+
+    let stream_postings = should_stream_bm25(terms.len(), touched_upper_bound);
+    let search_path = if stream_postings {
+        RawBm25FileSearchPath::SparseStream
+    } else {
+        RawBm25FileSearchPath::SparseCachedLengths
+    };
+    let search_stats = RawBm25FileSearchStats {
+        path: search_path,
+        terms_scored: terms.len(),
+        touched_postings_upper_bound: touched_upper_bound,
+        ..RawBm25FileSearchStats::default()
+    };
+    let capacity = touched_upper_bound.min(stats.num_docs() as usize);
+    let mut scores = HashMap::with_capacity(capacity);
+    if stream_postings {
+        for term in terms {
+            if term.idf == 0.0 {
+                continue;
+            }
+            segment
+                .for_each_posting_with_document_len(term.term_id, |doc_id, tf, doc_length| {
+                    if !is_visible(doc_id) || doc_length == 0 {
+                        return;
+                    }
+
+                    let tf_score = bm25_tf_score(tf as f32, doc_length as f32, avg_doc_len, params);
+                    let contribution = term.idf * tf_score;
+                    if contribution != 0.0 {
+                        let score = scores.entry(doc_id).or_insert(0.0);
+                        *score += contribution * term.count as f32;
+                    }
+                })
+                .map_err(RawScoringError::Source)?;
+        }
+    } else {
+        let mut doc_lengths = HashMap::with_capacity(capacity);
+        for term in terms {
+            if term.idf == 0.0 {
+                continue;
+            }
+            for (doc_id, tf) in segment
+                .postings(term.term_id)
+                .map_err(RawScoringError::Source)?
+            {
+                if !is_visible(doc_id) {
+                    continue;
+                }
                 let doc_length = match doc_lengths.get(&doc_id) {
                     Some(&len) => len,
                     None => {
@@ -2300,6 +2841,117 @@ where
     ))
 }
 
+fn retrieve_bm25_raw_dense_filtered<S, F>(
+    segment: &mut S,
+    plan: DenseRawBm25Plan,
+    terms: Vec<WeightedRawTerm>,
+    k: usize,
+    params: Bm25Params,
+    avg_doc_len: f32,
+    is_visible: &F,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<S::Error>>
+where
+    S: RawSegmentRead,
+    F: Fn(DocId) -> bool,
+{
+    let doc_base = plan.doc_base;
+    let slots = plan.slots;
+    let mut scores = vec![0.0; slots];
+    let mut doc_lengths = (!plan.stream_postings).then(|| vec![0u32; slots]);
+    let mut seen = vec![false; slots];
+    let mut touched = Vec::new();
+
+    if plan.stream_postings {
+        for term in terms {
+            if term.idf == 0.0 {
+                continue;
+            }
+            segment
+                .for_each_posting_with_document_len(term.term_id, |doc_id, tf, doc_length| {
+                    if !is_visible(doc_id) {
+                        return;
+                    }
+
+                    let slot = dense_doc_slot(doc_id, doc_base, slots);
+                    if !seen[slot] {
+                        seen[slot] = true;
+                        touched.push((doc_id, slot));
+                    }
+
+                    if doc_length == 0 {
+                        return;
+                    }
+
+                    let tf_score = bm25_tf_score(tf as f32, doc_length as f32, avg_doc_len, params);
+                    let contribution = term.idf * tf_score;
+                    if contribution != 0.0 {
+                        scores[slot] += contribution * term.count as f32;
+                    }
+                })
+                .map_err(RawScoringError::Source)?;
+        }
+    } else {
+        let doc_lengths = doc_lengths
+            .as_mut()
+            .expect("dense doc-length cache exists for non-streaming path");
+        if plan.prefill_doc_lengths {
+            segment
+                .for_each_document_len(|doc_id, doc_length| {
+                    if !is_visible(doc_id) {
+                        return;
+                    }
+                    let slot = dense_doc_slot(doc_id, doc_base, slots);
+                    doc_lengths[slot] = doc_length;
+                })
+                .map_err(RawScoringError::Source)?;
+        }
+        for term in terms {
+            if term.idf == 0.0 {
+                continue;
+            }
+            for (doc_id, tf) in segment
+                .postings(term.term_id)
+                .map_err(RawScoringError::Source)?
+            {
+                if !is_visible(doc_id) {
+                    continue;
+                }
+
+                let slot = dense_doc_slot(doc_id, doc_base, slots);
+                if !seen[slot] {
+                    seen[slot] = true;
+                    touched.push((doc_id, slot));
+                }
+
+                let mut doc_length = doc_lengths[slot];
+                if doc_length == 0 {
+                    doc_length = segment
+                        .document_len(doc_id)
+                        .map_err(RawScoringError::Source)?
+                        .unwrap_or(0);
+                    doc_lengths[slot] = doc_length;
+                }
+                if doc_length == 0 {
+                    continue;
+                }
+
+                let tf_score = bm25_tf_score(tf as f32, doc_length as f32, avg_doc_len, params);
+                let contribution = term.idf * tf_score;
+                if contribution != 0.0 {
+                    scores[slot] += contribution * term.count as f32;
+                }
+            }
+        }
+    }
+
+    Ok(top_k_positive_scored_docs(
+        touched
+            .into_iter()
+            .map(|(doc_id, slot)| (doc_id, scores[slot])),
+        k,
+    ))
+}
+
 fn should_prefill_dense_doc_lengths(num_docs: u32, touched_upper_bound: usize) -> bool {
     touched_upper_bound > 0 && touched_upper_bound >= (num_docs as usize).div_ceil(2)
 }
@@ -2752,6 +3404,55 @@ mod tests {
     }
 
     #[test]
+    fn raw_bm25_filtered_matches_live_only_in_memory_index() {
+        fn visible(doc_id: DocId) -> bool {
+            doc_id != 1
+        }
+
+        let raw_docs = vec![
+            (0, vec![(7, 2), (9, 1)]),
+            (1, vec![(7, 20), (9, 1)]),
+            (2, vec![(7, 4), (11, 1)]),
+            (3, vec![(11, 3)]),
+        ];
+        let live_docs: Vec<_> = raw_docs
+            .iter()
+            .filter(|(doc_id, _)| visible(*doc_id))
+            .cloned()
+            .collect();
+        let index = build_memory_index_with_doc_ids(&live_docs);
+        let bytes = build_raw_bytes_with_doc_ids(&raw_docs);
+        let segment = RawSegment::open(&bytes).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw.segment");
+        std::fs::write(&path, &bytes).unwrap();
+        let mut file_segment = RawSegmentFile::open(&path).unwrap();
+
+        let query = vec![7, 9, 7];
+        let expected = raw_bm25_memory_hits(&index, &query, 10, Bm25Params::default());
+
+        let byte_hits = retrieve_bm25_raw_segment_filtered(
+            &segment,
+            &query,
+            10,
+            Bm25Params::default(),
+            visible,
+        )
+        .unwrap();
+        assert_hits_close(&expected, &byte_hits, "byte filtered");
+
+        let file_hits = retrieve_bm25_raw_file_filtered(
+            &mut file_segment,
+            &query,
+            10,
+            Bm25Params::default(),
+            visible,
+        )
+        .unwrap();
+        assert_hits_close(&expected, &file_hits, "file filtered");
+    }
+
+    #[test]
     fn raw_bm25_file_candidates_match_in_memory_across_segments() {
         let first_docs = vec![(10, vec![(1, 2), (2, 1)]), (20, vec![(1, 1), (3, 4)])];
         let second_docs = vec![
@@ -2786,6 +3487,67 @@ mod tests {
         .unwrap();
 
         assert_hits_close(&expected, &raw_hits, "multi-file candidates");
+    }
+
+    #[test]
+    fn raw_bm25_files_filtered_keeps_deleted_docs_out_of_top_k_threshold() {
+        fn visible(doc_id: DocId) -> bool {
+            doc_id != 1
+        }
+
+        let first_docs = vec![(1, vec![(7, 100)]), (2, vec![(7, 4)])];
+        let second_docs = vec![(3, vec![(7, 3)])];
+        let mut live_docs: Vec<_> = first_docs
+            .iter()
+            .chain(second_docs.iter())
+            .filter(|(doc_id, _)| visible(*doc_id))
+            .cloned()
+            .collect();
+        live_docs.sort_unstable_by_key(|(doc_id, _)| *doc_id);
+        let index = build_memory_index_with_doc_ids(&live_docs);
+
+        let dir = tempfile::tempdir().unwrap();
+        let first_path = dir.path().join("first.raw");
+        let second_path = dir.path().join("second.raw");
+        std::fs::write(&first_path, build_raw_bytes_with_doc_ids(&first_docs)).unwrap();
+        std::fs::write(&second_path, build_raw_bytes_with_doc_ids(&second_docs)).unwrap();
+        let mut first_segment = RawSegmentFile::open(&first_path).unwrap();
+        let mut second_segment = RawSegmentFile::open(&second_path).unwrap();
+
+        let query = vec![7];
+        let expected = raw_bm25_memory_hits(&index, &query, 1, Bm25Params::default());
+        let mut segments = [&mut first_segment, &mut second_segment];
+
+        let unfiltered_stats = RawBm25CorpusStats::from_raw_files(&mut segments, &query).unwrap();
+        let unfiltered = retrieve_bm25_raw_files_with_stats(
+            &mut segments,
+            &query,
+            1,
+            Bm25Params::default(),
+            &unfiltered_stats,
+        )
+        .unwrap();
+        assert_eq!(
+            unfiltered.first().map(|(doc_id, _)| *doc_id),
+            Some(1),
+            "the fixture's stale document should win before filtering"
+        );
+
+        let filtered_stats =
+            RawBm25CorpusStats::from_raw_files_filtered(&mut segments, &query, visible).unwrap();
+        assert_eq!(filtered_stats.num_docs(), 2);
+        assert_eq!(filtered_stats.df(7), Some(2));
+        let filtered = retrieve_bm25_raw_files_filtered_with_stats(
+            &mut segments,
+            &query,
+            1,
+            Bm25Params::default(),
+            &filtered_stats,
+            visible,
+        )
+        .unwrap();
+
+        assert_hits_close(&expected, &filtered, "multi-file filtered");
     }
 
     #[test]

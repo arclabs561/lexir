@@ -138,6 +138,10 @@ Use `retrieve_bm25_raw_file_candidates` or
 `retrieve_bm25_raw_files_candidates` when an exact filter has already produced
 candidate doc ids, for example from `postings::positional::raw` phrase or NEAR
 matching.
+Use `retrieve_bm25_raw_file_filtered` or
+`retrieve_bm25_raw_files_filtered` when a lifecycle layer exposes tombstones or
+newer-version masks. The predicate is applied while building BM25 corpus stats
+and while scoring, so stale docs cannot fill a top-k slot before filtering.
 For streaming ingestion, `retrieve_bm25_raw_files_and_index` searches sealed
 raw segment files plus one live `postings::PostingsIndex<u64, u32>` shard with
 shared BM25 corpus stats, scoring the live shard first so its top-k threshold

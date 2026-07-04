@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a `raw_bm25_generation` example showing streaming lexical ingestion
   into raw files plus one live shard, with a persisted term-id dictionary
   sidecar.
+- Added filtered raw BM25 stats and retrieval helpers for byte-backed,
+  file-backed, and multi-file raw segments, so lifecycle layers can apply
+  tombstones or newer-version masks before top-k thresholds are computed.
+- Added Criterion coverage for filtered raw BM25 stats construction and
+  file-backed filtered scoring.
 
 ## [0.2.9] - 2026-07-04
 
