@@ -226,6 +226,30 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
         });
     }
 
+    let diagnostic_query = raw_query_terms(&segment, 8, 20);
+    let diagnostic_stats = {
+        let mut segments = [&mut segment];
+        lexir::raw::RawBm25CorpusStats::from_raw_files(&mut segments, &diagnostic_query).unwrap()
+    };
+    group.bench_with_input(
+        BenchmarkId::new("file_terms_search_stats", diagnostic_query.len()),
+        &diagnostic_query,
+        |b, query| {
+            b.iter(|| {
+                black_box(
+                    lexir::raw::retrieve_bm25_raw_file_with_search_stats(
+                        black_box(&mut segment),
+                        black_box(query.as_slice()),
+                        10,
+                        params,
+                        black_box(&diagnostic_stats),
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+
     let duplicate_query: Vec<_> = raw_query_terms(&segment, 32, 20)
         .into_iter()
         .flat_map(|term| std::iter::repeat(term).take(16))

@@ -230,6 +230,56 @@ pub struct RawBm25SearchResult {
     pub stats: RawBm25SearchStats,
 }
 
+/// File-backed raw BM25 traversal path used for a single segment search.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RawBm25FileSearchPath {
+    /// No scoring path was needed because the request or matching terms were empty.
+    #[default]
+    Noop,
+    /// Dense accumulator path using streamed `(doc_id, tf, doc_len)` postings.
+    DenseStream,
+    /// Dense accumulator path using postings plus cached document lengths.
+    DenseCachedLengths,
+    /// Sparse accumulator path using streamed `(doc_id, tf, doc_len)` postings.
+    SparseStream,
+    /// Sparse accumulator path using postings plus cached document lengths.
+    SparseCachedLengths,
+    /// File-backed block-pruned path using dense accumulators.
+    BlockPrunedDense,
+    /// File-backed block-pruned path using sparse accumulators.
+    BlockPrunedSparse,
+}
+
+/// Diagnostics for a single file-backed raw BM25 segment search.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct RawBm25FileSearchStats {
+    /// Traversal path selected for the segment.
+    pub path: RawBm25FileSearchPath,
+    /// Unique query terms that were present and scored after IDF filtering.
+    pub terms_scored: usize,
+    /// Sum of per-term document frequencies for scored terms.
+    pub touched_postings_upper_bound: usize,
+    /// Dense accumulator slots allocated by dense paths.
+    pub dense_slots: usize,
+    /// Per-term posting blocks considered by block-pruned paths.
+    pub term_blocks_seen: usize,
+    /// Per-term posting blocks decoded by block-pruned paths.
+    pub term_blocks_scored: usize,
+    /// Per-term posting blocks skipped by block-pruned paths.
+    pub term_blocks_pruned: usize,
+}
+
+/// Hits and traversal diagnostics from a single file-backed raw BM25 search.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RawBm25FileSearchResult {
+    /// Top-k hits sorted by descending BM25 score, then document id.
+    pub hits: Vec<(DocId, f32)>,
+    /// Traversal diagnostics for the search.
+    pub stats: RawBm25FileSearchStats,
+}
+
 impl RawBm25CorpusStats {
     /// Create corpus stats from a document count, average document length, and
     /// document frequencies for terms that may be scored.
@@ -540,11 +590,28 @@ pub fn retrieve_bm25_raw_file_with_stats(
     stats: &RawBm25CorpusStats,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
     if let Some(hits) =
-        retrieve_bm25_raw_file_with_stats_pruned_blocks(segment, query_terms, k, params, stats)?
+        retrieve_bm25_raw_file_with_stats_pruned_block_hits(segment, query_terms, k, params, stats)?
     {
         return Ok(hits);
     }
     retrieve_bm25_raw_with_stats(segment, query_terms, k, params, stats)
+}
+
+/// Retrieve top-k documents using BM25 over a file-backed raw segment and
+/// return traversal diagnostics.
+pub fn retrieve_bm25_raw_file_with_search_stats(
+    segment: &mut RawSegmentFile,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<RawBm25FileSearchResult, RawScoringError<RawSegmentFileError>> {
+    if let Some(result) =
+        retrieve_bm25_raw_file_with_stats_pruned_blocks(segment, query_terms, k, params, stats)?
+    {
+        return Ok(result);
+    }
+    retrieve_bm25_raw_with_stats_and_search_stats(segment, query_terms, k, params, stats)
 }
 
 /// Retrieve top-k documents across file-backed raw segments as one corpus.
@@ -684,6 +751,20 @@ fn retrieve_bm25_raw_with_stats<S>(
 where
     S: RawSegmentRead,
 {
+    retrieve_bm25_raw_with_stats_and_search_stats(segment, query_terms, k, params, stats)
+        .map(|result| result.hits)
+}
+
+fn retrieve_bm25_raw_with_stats_and_search_stats<S>(
+    segment: &mut S,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<RawBm25FileSearchResult, RawScoringError<S::Error>>
+where
+    S: RawSegmentRead,
+{
     if query_terms.is_empty() {
         return Err(RawScoringError::EmptyQuery);
     }
@@ -691,11 +772,17 @@ where
         return Err(RawScoringError::EmptyIndex);
     }
     if k == 0 {
-        return Ok(Vec::new());
+        return Ok(RawBm25FileSearchResult {
+            hits: Vec::new(),
+            stats: RawBm25FileSearchStats::default(),
+        });
     }
     let avg_doc_len = stats.avg_doc_len();
     if avg_doc_len <= 0.0 || !avg_doc_len.is_finite() {
-        return Ok(Vec::new());
+        return Ok(RawBm25FileSearchResult {
+            hits: Vec::new(),
+            stats: RawBm25FileSearchStats::default(),
+        });
     }
 
     let mut terms = raw_term_multiplicities(query_terms);
@@ -715,14 +802,18 @@ where
     }
     terms.retain(|term| term.idf != 0.0);
     if terms.is_empty() {
-        return Ok(Vec::new());
+        return Ok(RawBm25FileSearchResult {
+            hits: Vec::new(),
+            stats: RawBm25FileSearchStats::default(),
+        });
     }
 
     if let Some((doc_base, slots)) =
         dense_bm25_range(segment, touched_upper_bound).map_err(RawScoringError::Source)?
     {
+        let stream_postings = should_stream_bm25(terms.len(), touched_upper_bound);
         let dense_plan = DenseRawBm25Plan {
-            stream_postings: should_stream_bm25(terms.len(), touched_upper_bound),
+            stream_postings,
             doc_base,
             slots,
             prefill_doc_lengths: should_prefill_dense_doc_lengths(
@@ -730,10 +821,33 @@ where
                 touched_upper_bound,
             ),
         };
-        return retrieve_bm25_raw_dense(segment, dense_plan, terms, k, params, avg_doc_len);
+        let stats = RawBm25FileSearchStats {
+            path: if stream_postings {
+                RawBm25FileSearchPath::DenseStream
+            } else {
+                RawBm25FileSearchPath::DenseCachedLengths
+            },
+            terms_scored: terms.len(),
+            touched_postings_upper_bound: touched_upper_bound,
+            dense_slots: slots,
+            ..RawBm25FileSearchStats::default()
+        };
+        return retrieve_bm25_raw_dense(segment, dense_plan, terms, k, params, avg_doc_len)
+            .map(|hits| RawBm25FileSearchResult { hits, stats });
     }
 
     let stream_postings = should_stream_bm25(terms.len(), touched_upper_bound);
+    let search_path = if stream_postings {
+        RawBm25FileSearchPath::SparseStream
+    } else {
+        RawBm25FileSearchPath::SparseCachedLengths
+    };
+    let search_stats = RawBm25FileSearchStats {
+        path: search_path,
+        terms_scored: terms.len(),
+        touched_postings_upper_bound: touched_upper_bound,
+        ..RawBm25FileSearchStats::default()
+    };
     let capacity = touched_upper_bound.min(stats.num_docs() as usize);
     let mut scores = HashMap::with_capacity(capacity);
     if stream_postings {
@@ -791,7 +905,10 @@ where
         }
     }
 
-    Ok(top_k_positive_scored_docs(scores, k))
+    Ok(RawBm25FileSearchResult {
+        hits: top_k_positive_scored_docs(scores, k),
+        stats: search_stats,
+    })
 }
 
 const RAW_BM25_BLOCK_PRUNE_MIN_BLOCKS: usize = 16;
@@ -816,13 +933,22 @@ struct RawBm25BlockScoringTerm {
     blocks: Vec<RawPostingBlockMeta>,
 }
 
-fn retrieve_bm25_raw_file_with_stats_pruned_blocks(
+enum RawBm25PrunedBlockSearch {
+    Disabled,
+    Empty,
+    Search {
+        plan: RawBm25BlockScoringPlan,
+        avg_doc_len: f32,
+    },
+}
+
+fn prepare_raw_bm25_pruned_block_search(
     segment: &mut RawSegmentFile,
     query_terms: &[RawTermId],
     k: usize,
     params: Bm25Params,
     stats: &RawBm25CorpusStats,
-) -> Result<Option<Vec<(DocId, f32)>>, RawScoringError<RawSegmentFileError>> {
+) -> Result<RawBm25PrunedBlockSearch, RawScoringError<RawSegmentFileError>> {
     if query_terms.is_empty() {
         return Err(RawScoringError::EmptyQuery);
     }
@@ -830,29 +956,46 @@ fn retrieve_bm25_raw_file_with_stats_pruned_blocks(
         return Err(RawScoringError::EmptyIndex);
     }
     if k == 0 {
-        return Ok(Some(Vec::new()));
+        return Ok(RawBm25PrunedBlockSearch::Empty);
     }
     let avg_doc_len = stats.avg_doc_len();
     if avg_doc_len <= 0.0 || !avg_doc_len.is_finite() {
-        return Ok(Some(Vec::new()));
+        return Ok(RawBm25PrunedBlockSearch::Empty);
     }
     if !can_prune_raw_bm25_blocks(params) {
-        return Ok(None);
+        return Ok(RawBm25PrunedBlockSearch::Disabled);
     }
     if (segment.num_docs() as usize) < RAW_BM25_BLOCK_PRUNE_MIN_TOUCHES {
-        return Ok(None);
+        return Ok(RawBm25PrunedBlockSearch::Disabled);
     }
 
     let Some(plan) = prepare_raw_bm25_block_scoring_plan(segment, query_terms, stats)? else {
-        return Ok(None);
+        return Ok(RawBm25PrunedBlockSearch::Disabled);
     };
     if plan.terms.is_empty() {
-        return Ok(Some(Vec::new()));
+        return Ok(RawBm25PrunedBlockSearch::Empty);
     }
     if plan.total_blocks < RAW_BM25_BLOCK_PRUNE_MIN_BLOCKS || plan.total_blocks <= plan.terms.len()
     {
-        return Ok(None);
+        return Ok(RawBm25PrunedBlockSearch::Disabled);
     }
+
+    Ok(RawBm25PrunedBlockSearch::Search { plan, avg_doc_len })
+}
+
+fn retrieve_bm25_raw_file_with_stats_pruned_block_hits(
+    segment: &mut RawSegmentFile,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<Option<Vec<(DocId, f32)>>, RawScoringError<RawSegmentFileError>> {
+    let (plan, avg_doc_len) =
+        match prepare_raw_bm25_pruned_block_search(segment, query_terms, k, params, stats)? {
+            RawBm25PrunedBlockSearch::Disabled => return Ok(None),
+            RawBm25PrunedBlockSearch::Empty => return Ok(Some(Vec::new())),
+            RawBm25PrunedBlockSearch::Search { plan, avg_doc_len } => (plan, avg_doc_len),
+        };
 
     if let Some((doc_base, slots)) =
         dense_bm25_range(segment, plan.touched_upper_bound).map_err(RawScoringError::Source)?
@@ -860,11 +1003,11 @@ fn retrieve_bm25_raw_file_with_stats_pruned_blocks(
         return retrieve_bm25_raw_file_pruned_blocks_dense(
             segment,
             &plan.terms,
-            doc_base,
-            slots,
+            (doc_base, slots),
             k,
             params,
             avg_doc_len,
+            None,
         )
         .map(Some);
     }
@@ -872,13 +1015,82 @@ fn retrieve_bm25_raw_file_with_stats_pruned_blocks(
     retrieve_bm25_raw_file_pruned_blocks_sparse(
         segment,
         &plan.terms,
-        plan.touched_upper_bound,
-        stats.num_docs(),
+        plan.touched_upper_bound.min(stats.num_docs() as usize),
         k,
         params,
         avg_doc_len,
+        None,
     )
     .map(Some)
+}
+
+fn retrieve_bm25_raw_file_with_stats_pruned_blocks(
+    segment: &mut RawSegmentFile,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<Option<RawBm25FileSearchResult>, RawScoringError<RawSegmentFileError>> {
+    let (plan, avg_doc_len) =
+        match prepare_raw_bm25_pruned_block_search(segment, query_terms, k, params, stats)? {
+            RawBm25PrunedBlockSearch::Disabled => return Ok(None),
+            RawBm25PrunedBlockSearch::Empty => {
+                return Ok(Some(RawBm25FileSearchResult {
+                    hits: Vec::new(),
+                    stats: RawBm25FileSearchStats::default(),
+                }))
+            }
+            RawBm25PrunedBlockSearch::Search { plan, avg_doc_len } => (plan, avg_doc_len),
+        };
+
+    if let Some((doc_base, slots)) =
+        dense_bm25_range(segment, plan.touched_upper_bound).map_err(RawScoringError::Source)?
+    {
+        let mut search_stats = RawBm25FileSearchStats {
+            path: RawBm25FileSearchPath::BlockPrunedDense,
+            terms_scored: plan.terms.len(),
+            touched_postings_upper_bound: plan.touched_upper_bound,
+            dense_slots: slots,
+            ..RawBm25FileSearchStats::default()
+        };
+        return retrieve_bm25_raw_file_pruned_blocks_dense(
+            segment,
+            &plan.terms,
+            (doc_base, slots),
+            k,
+            params,
+            avg_doc_len,
+            Some(&mut search_stats),
+        )
+        .map(|hits| {
+            Some(RawBm25FileSearchResult {
+                hits,
+                stats: search_stats,
+            })
+        });
+    }
+
+    let mut search_stats = RawBm25FileSearchStats {
+        path: RawBm25FileSearchPath::BlockPrunedSparse,
+        terms_scored: plan.terms.len(),
+        touched_postings_upper_bound: plan.touched_upper_bound,
+        ..RawBm25FileSearchStats::default()
+    };
+    retrieve_bm25_raw_file_pruned_blocks_sparse(
+        segment,
+        &plan.terms,
+        plan.touched_upper_bound.min(stats.num_docs() as usize),
+        k,
+        params,
+        avg_doc_len,
+        Some(&mut search_stats),
+    )
+    .map(|hits| {
+        Some(RawBm25FileSearchResult {
+            hits,
+            stats: search_stats,
+        })
+    })
 }
 
 fn prepare_raw_bm25_block_scoring_plan(
@@ -951,12 +1163,13 @@ fn prepare_raw_bm25_block_scoring_plan(
 fn retrieve_bm25_raw_file_pruned_blocks_dense(
     segment: &mut RawSegmentFile,
     terms: &[RawBm25BlockScoringTerm],
-    doc_base: DocId,
-    slots: usize,
+    dense_range: (DocId, usize),
     k: usize,
     params: Bm25Params,
     avg_doc_len: f32,
+    mut stats: Option<&mut RawBm25FileSearchStats>,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    let (doc_base, slots) = dense_range;
     let mut scores = vec![0.0; slots];
     let mut seen = vec![false; slots];
     let mut touched = Vec::new();
@@ -964,12 +1177,21 @@ fn retrieve_bm25_raw_file_pruned_blocks_dense(
 
     for term in terms {
         for (block_index, &block) in term.blocks.iter().enumerate() {
+            if let Some(stats) = stats.as_mut() {
+                stats.term_blocks_seen += 1;
+            }
             let upper_bound = raw_bm25_block_range_upper_bound(block, terms, avg_doc_len, params);
             if threshold
                 .threshold()
                 .is_some_and(|threshold| upper_bound < threshold)
             {
+                if let Some(stats) = stats.as_mut() {
+                    stats.term_blocks_pruned += 1;
+                }
                 continue;
+            }
+            if let Some(stats) = stats.as_mut() {
+                stats.term_blocks_scored += 1;
             }
 
             segment
@@ -1010,24 +1232,32 @@ fn retrieve_bm25_raw_file_pruned_blocks_dense(
 fn retrieve_bm25_raw_file_pruned_blocks_sparse(
     segment: &mut RawSegmentFile,
     terms: &[RawBm25BlockScoringTerm],
-    touched_upper_bound: usize,
-    num_docs: u32,
+    capacity: usize,
     k: usize,
     params: Bm25Params,
     avg_doc_len: f32,
+    mut stats: Option<&mut RawBm25FileSearchStats>,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
-    let capacity = touched_upper_bound.min(num_docs as usize);
     let mut scores = HashMap::with_capacity(capacity);
     let mut threshold = RawBm25TopKThreshold::new(k);
 
     for term in terms {
         for (block_index, &block) in term.blocks.iter().enumerate() {
+            if let Some(stats) = stats.as_mut() {
+                stats.term_blocks_seen += 1;
+            }
             let upper_bound = raw_bm25_block_range_upper_bound(block, terms, avg_doc_len, params);
             if threshold
                 .threshold()
                 .is_some_and(|threshold| upper_bound < threshold)
             {
+                if let Some(stats) = stats.as_mut() {
+                    stats.term_blocks_pruned += 1;
+                }
                 continue;
+            }
+            if let Some(stats) = stats.as_mut() {
+                stats.term_blocks_scored += 1;
             }
 
             segment
@@ -1800,12 +2030,63 @@ mod tests {
         )
         .unwrap()
         .expect("fixture should enter the block-pruned path");
-        assert_hits_close(&expected, &pruned, "block-pruned file BM25");
+        assert_hits_close(&expected, &pruned.hits, "block-pruned file BM25");
+        assert_eq!(pruned.stats.path, RawBm25FileSearchPath::BlockPrunedDense);
+        assert_eq!(pruned.stats.terms_scored, plan.terms.len());
+        assert_eq!(pruned.stats.term_blocks_seen, plan.total_blocks);
+        assert!(
+            pruned.stats.term_blocks_scored > 0,
+            "fixture must decode at least one term block"
+        );
 
         let file_hits =
             retrieve_bm25_raw_file_with_stats(&mut file_segment, &query, 10, params, &stats)
                 .unwrap();
         assert_hits_close(&expected, &file_hits, "public file BM25");
+    }
+
+    #[test]
+    fn raw_bm25_file_block_pruning_stats_report_skipped_blocks() {
+        const TERM: RawTermId = 10;
+        const FIRST_BLOCK_DOCS: u32 = 128;
+        let raw_docs: Vec<_> = (0..4096)
+            .map(|doc_id| {
+                (
+                    doc_id,
+                    vec![(TERM, if doc_id < FIRST_BLOCK_DOCS { 10_000 } else { 1 })],
+                )
+            })
+            .collect();
+        let bytes = build_raw_bytes_with_doc_ids(&raw_docs);
+        let segment = RawSegment::open(&bytes).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw.segment");
+        std::fs::write(&path, &bytes).unwrap();
+        let mut file_segment = RawSegmentFile::open(&path).unwrap();
+        let query = vec![TERM];
+        let params = Bm25Params::default();
+        let stats = {
+            let mut segments = [&mut file_segment];
+            RawBm25CorpusStats::from_raw_files(&mut segments, &query).unwrap()
+        };
+        let expected =
+            retrieve_bm25_raw_segment_with_stats(&segment, &query, 10, params, &stats).unwrap();
+
+        let result =
+            retrieve_bm25_raw_file_with_search_stats(&mut file_segment, &query, 10, params, &stats)
+                .unwrap();
+
+        assert_hits_close(&expected, &result.hits, "block-pruned file BM25");
+        assert_eq!(result.stats.path, RawBm25FileSearchPath::BlockPrunedDense);
+        assert!(result.stats.term_blocks_seen >= RAW_BM25_BLOCK_PRUNE_MIN_BLOCKS);
+        assert!(
+            result.stats.term_blocks_pruned > 0,
+            "fixture must skip at least one low-bound term block"
+        );
+        assert_eq!(
+            result.stats.term_blocks_seen,
+            result.stats.term_blocks_scored + result.stats.term_blocks_pruned
+        );
     }
 
     #[test]
@@ -2156,11 +2437,19 @@ mod tests {
         query.extend(1_000..1_064);
         let stats = RawBm25CorpusStats::new(100, 1.0, [(7, 1)]);
 
-        let hits =
-            retrieve_bm25_raw_with_stats(&mut reader, &query, 1, Bm25Params::default(), &stats)
-                .unwrap();
+        let result = retrieve_bm25_raw_with_stats_and_search_stats(
+            &mut reader,
+            &query,
+            1,
+            Bm25Params::default(),
+            &stats,
+        )
+        .unwrap();
 
-        assert_eq!(hits.len(), 1);
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.stats.path, RawBm25FileSearchPath::SparseStream);
+        assert_eq!(result.stats.terms_scored, 1);
+        assert_eq!(result.stats.touched_postings_upper_bound, 1);
         assert_eq!(reader.streamed_calls, 1);
         assert_eq!(reader.postings_calls, 0);
     }
