@@ -90,7 +90,8 @@ assert!(!hits.is_empty());
 
 Runnable examples live in [`examples/`](examples/), including `readme_examples`,
 which exercises the snippets shown above, and `raw_bm25_segment`, which scores a
-file-backed `postings::raw::RawSegmentFile`.
+file-backed `postings::raw::RawSegmentFile` from lexical terms encoded by
+`RawTermDictionary`.
 
 ## File-backed BM25
 
