@@ -569,6 +569,18 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
             });
         },
     );
+    group.bench_function("files_and_live_index_all_terms_stats_build", |b| {
+        b.iter(|| {
+            let mut segments: Vec<_> = mixed_segments.iter_mut().collect();
+            black_box(
+                lexir::raw::RawBm25CorpusStats::from_raw_files_and_index_all_terms(
+                    black_box(segments.as_mut_slice()),
+                    black_box(&live_index),
+                )
+                .unwrap(),
+            );
+        });
+    });
     group.bench_with_input(
         BenchmarkId::new("files_and_live_index_terms_with_stats", multi_query.len()),
         &multi_query,

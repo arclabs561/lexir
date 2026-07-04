@@ -399,6 +399,53 @@ impl RawBm25CorpusStats {
         })
     }
 
+    /// Build corpus stats for all terms present in file-backed raw segments and
+    /// one live in-memory raw postings shard.
+    ///
+    /// This reads fixed segment directories, not postings payloads, and folds in
+    /// the live shard's current document frequencies. Use this when serving many
+    /// queries over sealed raw files plus a bounded live shard.
+    pub fn from_raw_files_and_index_all_terms(
+        segments: &mut [&mut RawSegmentFile],
+        live_index: &PostingsIndex<RawTermId, u32>,
+    ) -> Result<Self, RawScoringError<RawSegmentFileError>> {
+        let mut num_docs = 0u32;
+        let mut total_doc_len = 0.0f64;
+        let mut dfs = HashMap::new();
+
+        for segment in segments.iter_mut() {
+            let segment_docs = segment.num_docs();
+            num_docs = num_docs.saturating_add(segment_docs);
+            total_doc_len += segment.avg_doc_len() as f64 * segment_docs as f64;
+
+            segment
+                .for_each_term_meta(|term| {
+                    let total_df = dfs.entry(term.term_id()).or_insert(0u32);
+                    *total_df = total_df.saturating_add(term.df());
+                })
+                .map_err(RawSegmentFileError::from)
+                .map_err(RawScoringError::Source)?;
+        }
+
+        let live_docs = live_index.num_docs();
+        num_docs = num_docs.saturating_add(live_docs);
+        total_doc_len += live_index.avg_doc_len() as f64 * live_docs as f64;
+        for term_id in live_index.terms() {
+            let total_df = dfs.entry(*term_id).or_insert(0u32);
+            *total_df = total_df.saturating_add(live_index.df(term_id));
+        }
+
+        if num_docs == 0 {
+            return Err(RawScoringError::EmptyIndex);
+        }
+
+        Ok(Self {
+            num_docs,
+            avg_doc_len: (total_doc_len / num_docs as f64) as f32,
+            dfs,
+        })
+    }
+
     /// Build corpus stats for all terms present in file-backed raw segments.
     ///
     /// This reads fixed segment directories, not postings payloads. Use this
@@ -2395,6 +2442,16 @@ mod tests {
         assert_eq!(stats.df(30), Some(2));
         assert_eq!(stats.df(40), Some(2));
 
+        let all_stats =
+            RawBm25CorpusStats::from_raw_files_and_index_all_terms(&mut segments, &live_index)
+                .unwrap();
+        assert_eq!(all_stats.num_docs(), 6);
+        assert_eq!(all_stats.df(10), Some(3));
+        assert_eq!(all_stats.df(20), Some(3));
+        assert_eq!(all_stats.df(30), Some(2));
+        assert_eq!(all_stats.df(40), Some(2));
+        assert_eq!(all_stats.df(99), None);
+
         let got = retrieve_bm25_raw_files_and_index_with_stats(
             &mut segments,
             &live_index,
@@ -2412,10 +2469,20 @@ mod tests {
             Bm25Params::default(),
         )
         .unwrap();
+        let all_stats_got = retrieve_bm25_raw_files_and_index_with_stats(
+            &mut segments,
+            &live_index,
+            &query,
+            10,
+            Bm25Params::default(),
+            &all_stats,
+        )
+        .unwrap();
         let expected = raw_bm25_memory_hits(&index, &query, 10, Bm25Params::default());
 
         assert_hits_close(&expected, &got, "raw files plus live shard BM25");
         assert_eq!(auto_stats_got, got);
+        assert_eq!(all_stats_got, got);
     }
 
     #[test]

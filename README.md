@@ -116,9 +116,10 @@ Use `retrieve_bm25_raw_file_with_search_stats` for single-segment traversal
 diagnostics and `retrieve_bm25_raw_files_with_search_stats` for searched/pruned
 segment counts. `RawBm25CorpusStats::from_raw_files_all_terms` builds reusable
 stats for all terms in a raw segment generation without reading postings
-payloads. File-backed BM25 can also use raw posting-block metadata to skip
-blocks that cannot enter the current top-k. Segment document ids must already
-be globally unique.
+payloads; `from_raw_files_and_index_all_terms` does the same for sealed files
+plus one live shard. File-backed BM25 can also use raw posting-block metadata
+to skip blocks that cannot enter the current top-k. Segment document ids must
+already be globally unique.
 
 `RawTermDictionary` is an in-process adapter from lexical terms to numeric raw
 term ids. `insert` assigns ids in insertion order; `from_terms_sorted` assigns

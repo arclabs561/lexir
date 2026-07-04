@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `RawBm25CorpusStats::from_raw_files_and_index_all_terms` for reusable
+  BM25 stats over sealed raw files plus one live numeric postings shard.
+- Added raw BM25 benchmark coverage for all-term stats construction over sealed
+  files plus one live shard.
+
 ## [0.2.6] - 2026-07-04
 
 ### Added
