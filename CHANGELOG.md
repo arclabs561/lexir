@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Changed all-term raw BM25 stats construction to stream raw segment term
+  metadata from postings instead of allocating a full term-id vector or doing a
+  second directory lookup per term.
+
 ## [0.2.4] - 2026-07-03
 
 ### Added

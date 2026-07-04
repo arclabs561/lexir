@@ -164,15 +164,13 @@ impl RawBm25CorpusStats {
             num_docs = num_docs.saturating_add(segment_docs);
             total_doc_len += segment.avg_doc_len() as f64 * segment_docs as f64;
 
-            for term_id in segment
-                .term_ids()
+            segment
+                .for_each_term_meta(|term| {
+                    let total_df = dfs.entry(term.term_id()).or_insert(0u32);
+                    *total_df = total_df.saturating_add(term.df());
+                })
                 .map_err(RawSegmentFileError::from)
-                .map_err(RawScoringError::Source)?
-            {
-                let df = segment.df(term_id).map_err(RawScoringError::Source)?;
-                let total_df = dfs.entry(term_id).or_insert(0u32);
-                *total_df = total_df.saturating_add(df);
-            }
+                .map_err(RawScoringError::Source)?;
         }
 
         if num_docs == 0 {
