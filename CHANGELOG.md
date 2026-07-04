@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `RawTermDictionary::from_terms_in_id_order` for reloading persisted
   dictionary sidecars without re-sorting or silently accepting duplicate terms.
 
+### Changed
+
+- Changed multi-file raw BM25 search to pass the current global top-k threshold
+  into block-pruned file scoring, allowing low-bound blocks to be skipped before
+  the selected file fills its own local top-k. Added regression and benchmark
+  coverage for that selected-file block-pruning shape.
+
 ## [0.2.8] - 2026-07-04
 
 ### Changed

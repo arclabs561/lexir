@@ -779,9 +779,25 @@ pub fn retrieve_bm25_raw_file_with_stats(
     params: Bm25Params,
     stats: &RawBm25CorpusStats,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
-    if let Some(hits) =
-        retrieve_bm25_raw_file_with_stats_pruned_block_hits(segment, query_terms, k, params, stats)?
-    {
+    retrieve_bm25_raw_file_with_stats_min_score(segment, query_terms, k, params, stats, None)
+}
+
+fn retrieve_bm25_raw_file_with_stats_min_score(
+    segment: &mut RawSegmentFile,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+    min_score: Option<f32>,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    if let Some(hits) = retrieve_bm25_raw_file_with_stats_pruned_block_hits(
+        segment,
+        query_terms,
+        k,
+        params,
+        stats,
+        min_score,
+    )? {
         return Ok(hits);
     }
     retrieve_bm25_raw_with_stats(segment, query_terms, k, params, stats)
@@ -796,9 +812,14 @@ pub fn retrieve_bm25_raw_file_with_search_stats(
     params: Bm25Params,
     stats: &RawBm25CorpusStats,
 ) -> Result<RawBm25FileSearchResult, RawScoringError<RawSegmentFileError>> {
-    if let Some(result) =
-        retrieve_bm25_raw_file_with_stats_pruned_blocks(segment, query_terms, k, params, stats)?
-    {
+    if let Some(result) = retrieve_bm25_raw_file_with_stats_pruned_blocks(
+        segment,
+        query_terms,
+        k,
+        params,
+        stats,
+        None,
+    )? {
         return Ok(result);
     }
     retrieve_bm25_raw_with_stats_and_search_stats(segment, query_terms, k, params, stats)
@@ -998,12 +1019,14 @@ fn retrieve_bm25_raw_files_with_search_stats_seeded(
             continue;
         }
         search_stats.segments_scored += 1;
-        candidates.extend(retrieve_bm25_raw_file_with_stats(
+        let min_score = (candidates.len() >= k).then_some(threshold);
+        candidates.extend(retrieve_bm25_raw_file_with_stats_min_score(
             segments[index],
             query_terms,
             k,
             params,
             stats,
+            min_score,
         )?);
         if candidates.len() >= k {
             candidates = top_k_positive_scored_docs(candidates, k);
@@ -1220,6 +1243,14 @@ struct RawBm25BlockScoringTerm {
     blocks: Vec<RawPostingBlockMeta>,
 }
 
+#[derive(Clone, Copy)]
+struct RawBm25BlockPruneContext {
+    k: usize,
+    params: Bm25Params,
+    avg_doc_len: f32,
+    min_score: Option<f32>,
+}
+
 enum RawBm25PrunedBlockSearch {
     Disabled,
     Empty,
@@ -1276,6 +1307,7 @@ fn retrieve_bm25_raw_file_with_stats_pruned_block_hits(
     k: usize,
     params: Bm25Params,
     stats: &RawBm25CorpusStats,
+    min_score: Option<f32>,
 ) -> Result<Option<Vec<(DocId, f32)>>, RawScoringError<RawSegmentFileError>> {
     let (plan, avg_doc_len) =
         match prepare_raw_bm25_pruned_block_search(segment, query_terms, k, params, stats)? {
@@ -1287,25 +1319,33 @@ fn retrieve_bm25_raw_file_with_stats_pruned_block_hits(
     if let Some((doc_base, slots)) =
         dense_bm25_range(segment, plan.touched_upper_bound).map_err(RawScoringError::Source)?
     {
+        let context = RawBm25BlockPruneContext {
+            k,
+            params,
+            avg_doc_len,
+            min_score,
+        };
         return retrieve_bm25_raw_file_pruned_blocks_dense(
             segment,
             &plan.terms,
             (doc_base, slots),
-            k,
-            params,
-            avg_doc_len,
+            context,
             None,
         )
         .map(Some);
     }
 
+    let context = RawBm25BlockPruneContext {
+        k,
+        params,
+        avg_doc_len,
+        min_score,
+    };
     retrieve_bm25_raw_file_pruned_blocks_sparse(
         segment,
         &plan.terms,
         plan.touched_upper_bound.min(stats.num_docs() as usize),
-        k,
-        params,
-        avg_doc_len,
+        context,
         None,
     )
     .map(Some)
@@ -1317,6 +1357,7 @@ fn retrieve_bm25_raw_file_with_stats_pruned_blocks(
     k: usize,
     params: Bm25Params,
     stats: &RawBm25CorpusStats,
+    min_score: Option<f32>,
 ) -> Result<Option<RawBm25FileSearchResult>, RawScoringError<RawSegmentFileError>> {
     let (plan, avg_doc_len) =
         match prepare_raw_bm25_pruned_block_search(segment, query_terms, k, params, stats)? {
@@ -1333,6 +1374,12 @@ fn retrieve_bm25_raw_file_with_stats_pruned_blocks(
     if let Some((doc_base, slots)) =
         dense_bm25_range(segment, plan.touched_upper_bound).map_err(RawScoringError::Source)?
     {
+        let context = RawBm25BlockPruneContext {
+            k,
+            params,
+            avg_doc_len,
+            min_score,
+        };
         let mut search_stats = RawBm25FileSearchStats {
             path: RawBm25FileSearchPath::BlockPrunedDense,
             terms_scored: plan.terms.len(),
@@ -1344,9 +1391,7 @@ fn retrieve_bm25_raw_file_with_stats_pruned_blocks(
             segment,
             &plan.terms,
             (doc_base, slots),
-            k,
-            params,
-            avg_doc_len,
+            context,
             Some(&mut search_stats),
         )
         .map(|hits| {
@@ -1357,6 +1402,12 @@ fn retrieve_bm25_raw_file_with_stats_pruned_blocks(
         });
     }
 
+    let context = RawBm25BlockPruneContext {
+        k,
+        params,
+        avg_doc_len,
+        min_score,
+    };
     let mut search_stats = RawBm25FileSearchStats {
         path: RawBm25FileSearchPath::BlockPrunedSparse,
         terms_scored: plan.terms.len(),
@@ -1367,9 +1418,7 @@ fn retrieve_bm25_raw_file_with_stats_pruned_blocks(
         segment,
         &plan.terms,
         plan.touched_upper_bound.min(stats.num_docs() as usize),
-        k,
-        params,
-        avg_doc_len,
+        context,
         Some(&mut search_stats),
     )
     .map(|hits| {
@@ -1451,25 +1500,24 @@ fn retrieve_bm25_raw_file_pruned_blocks_dense(
     segment: &mut RawSegmentFile,
     terms: &[RawBm25BlockScoringTerm],
     dense_range: (DocId, usize),
-    k: usize,
-    params: Bm25Params,
-    avg_doc_len: f32,
+    context: RawBm25BlockPruneContext,
     mut stats: Option<&mut RawBm25FileSearchStats>,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
     let (doc_base, slots) = dense_range;
     let mut scores = vec![0.0; slots];
     let mut seen = vec![false; slots];
     let mut touched = Vec::new();
-    let mut threshold = RawBm25TopKThreshold::new(k);
+    let mut threshold = RawBm25TopKThreshold::new(context.k);
 
     for term in terms {
         for (block_index, &block) in term.blocks.iter().enumerate() {
             if let Some(stats) = stats.as_mut() {
                 stats.term_blocks_seen += 1;
             }
-            let upper_bound = raw_bm25_block_range_upper_bound(block, terms, avg_doc_len, params);
+            let upper_bound =
+                raw_bm25_block_range_upper_bound(block, terms, context.avg_doc_len, context.params);
             if threshold
-                .threshold()
+                .prune_threshold(context.min_score)
                 .is_some_and(|threshold| upper_bound < threshold)
             {
                 if let Some(stats) = stats.as_mut() {
@@ -1495,8 +1543,12 @@ fn retrieve_bm25_raw_file_pruned_blocks_dense(
                             return;
                         }
 
-                        let tf_score =
-                            bm25_tf_score(tf as f32, doc_length as f32, avg_doc_len, params);
+                        let tf_score = bm25_tf_score(
+                            tf as f32,
+                            doc_length as f32,
+                            context.avg_doc_len,
+                            context.params,
+                        );
                         let contribution = term.idf * tf_score;
                         if contribution != 0.0 {
                             scores[slot] += contribution * term.count as f32;
@@ -1512,7 +1564,7 @@ fn retrieve_bm25_raw_file_pruned_blocks_dense(
         touched
             .into_iter()
             .map(|(doc_id, slot)| (doc_id, scores[slot])),
-        k,
+        context.k,
     ))
 }
 
@@ -1520,22 +1572,21 @@ fn retrieve_bm25_raw_file_pruned_blocks_sparse(
     segment: &mut RawSegmentFile,
     terms: &[RawBm25BlockScoringTerm],
     capacity: usize,
-    k: usize,
-    params: Bm25Params,
-    avg_doc_len: f32,
+    context: RawBm25BlockPruneContext,
     mut stats: Option<&mut RawBm25FileSearchStats>,
 ) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
     let mut scores = HashMap::with_capacity(capacity);
-    let mut threshold = RawBm25TopKThreshold::new(k);
+    let mut threshold = RawBm25TopKThreshold::new(context.k);
 
     for term in terms {
         for (block_index, &block) in term.blocks.iter().enumerate() {
             if let Some(stats) = stats.as_mut() {
                 stats.term_blocks_seen += 1;
             }
-            let upper_bound = raw_bm25_block_range_upper_bound(block, terms, avg_doc_len, params);
+            let upper_bound =
+                raw_bm25_block_range_upper_bound(block, terms, context.avg_doc_len, context.params);
             if threshold
-                .threshold()
+                .prune_threshold(context.min_score)
                 .is_some_and(|threshold| upper_bound < threshold)
             {
                 if let Some(stats) = stats.as_mut() {
@@ -1556,8 +1607,12 @@ fn retrieve_bm25_raw_file_pruned_blocks_sparse(
                             return;
                         }
 
-                        let tf_score =
-                            bm25_tf_score(tf as f32, doc_length as f32, avg_doc_len, params);
+                        let tf_score = bm25_tf_score(
+                            tf as f32,
+                            doc_length as f32,
+                            context.avg_doc_len,
+                            context.params,
+                        );
                         let contribution = term.idf * tf_score;
                         if contribution != 0.0 {
                             let score = scores.entry(doc_id).or_insert(0.0);
@@ -1570,7 +1625,7 @@ fn retrieve_bm25_raw_file_pruned_blocks_sparse(
         }
     }
 
-    Ok(top_k_positive_scored_docs(scores, k))
+    Ok(top_k_positive_scored_docs(scores, context.k))
 }
 
 fn raw_bm25_block_range_upper_bound(
@@ -1677,6 +1732,17 @@ impl RawBm25TopKThreshold {
         }
         self.sort_if_needed();
         self.ranked.last().map(|(_, score)| *score)
+    }
+
+    fn prune_threshold(&mut self, min_score: Option<f32>) -> Option<f32> {
+        let local = self.threshold();
+        let min_score = min_score.filter(|score| score.is_finite() && *score > 0.0);
+        match (local, min_score) {
+            (Some(local), Some(min_score)) => Some(local.max(min_score)),
+            (Some(local), None) => Some(local),
+            (None, Some(min_score)) => Some(min_score),
+            (None, None) => None,
+        }
     }
 
     fn sort_if_needed(&mut self) {
@@ -2339,6 +2405,7 @@ mod tests {
             10,
             params,
             &stats,
+            None,
         )
         .unwrap()
         .expect("fixture should enter the block-pruned path");
@@ -2398,6 +2465,89 @@ mod tests {
         assert_eq!(
             result.stats.term_blocks_seen,
             result.stats.term_blocks_scored + result.stats.term_blocks_pruned
+        );
+    }
+
+    #[test]
+    fn raw_bm25_file_block_pruning_uses_seeded_score_floor() {
+        const TERM: RawTermId = 10;
+        const TOTAL_DOCS: u32 = 4096;
+        const LAST_BLOCK_DOCS: u32 = 128;
+        let high_start = TOTAL_DOCS - LAST_BLOCK_DOCS;
+        let raw_docs: Vec<_> = (0..TOTAL_DOCS)
+            .map(|doc_id| {
+                (
+                    doc_id,
+                    vec![(TERM, if doc_id >= high_start { 10_000 } else { 1 })],
+                )
+            })
+            .collect();
+        let bytes = build_raw_bytes_with_doc_ids(&raw_docs);
+        let segment = RawSegment::open(&bytes).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw.segment");
+        std::fs::write(&path, &bytes).unwrap();
+        let mut file_segment = RawSegmentFile::open(&path).unwrap();
+        let query = vec![TERM];
+        let params = Bm25Params::default();
+        let stats = {
+            let mut segments = [&mut file_segment];
+            RawBm25CorpusStats::from_raw_files(&mut segments, &query).unwrap()
+        };
+        let plan = match prepare_raw_bm25_pruned_block_search(
+            &mut file_segment,
+            &query,
+            10,
+            params,
+            &stats,
+        )
+        .unwrap()
+        {
+            RawBm25PrunedBlockSearch::Search { plan, .. } => plan,
+            _ => panic!("fixture should enter the block-pruned path"),
+        };
+        let low_bound = raw_bm25_block_range_upper_bound(
+            plan.terms[0].blocks[0],
+            &plan.terms,
+            stats.avg_doc_len(),
+            params,
+        );
+        let high_bound = raw_bm25_block_range_upper_bound(
+            *plan.terms[0].blocks.last().unwrap(),
+            &plan.terms,
+            stats.avg_doc_len(),
+            params,
+        );
+        assert!(low_bound < high_bound);
+        let seeded_floor = (low_bound + high_bound) / 2.0;
+        let expected =
+            retrieve_bm25_raw_segment_with_stats(&segment, &query, 10, params, &stats).unwrap();
+
+        let unseeded = retrieve_bm25_raw_file_with_stats_pruned_blocks(
+            &mut file_segment,
+            &query,
+            10,
+            params,
+            &stats,
+            None,
+        )
+        .unwrap()
+        .expect("fixture should enter the block-pruned path");
+        let seeded = retrieve_bm25_raw_file_with_stats_pruned_blocks(
+            &mut file_segment,
+            &query,
+            10,
+            params,
+            &stats,
+            Some(seeded_floor),
+        )
+        .unwrap()
+        .expect("fixture should enter the block-pruned path");
+
+        assert_hits_close(&expected, &seeded.hits, "seeded block-pruned BM25");
+        assert!(
+            seeded.stats.term_blocks_pruned > unseeded.stats.term_blocks_pruned,
+            "seeded floor should skip low-bound blocks before local top-k fills"
         );
     }
 

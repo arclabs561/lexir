@@ -199,6 +199,40 @@ fn build_live_prunable_raw_files() -> (
 }
 
 #[cfg(feature = "raw-segment")]
+fn build_seeded_block_prunable_raw_files() -> (
+    tempfile::TempDir,
+    Vec<RawSegmentFile>,
+    lexir::raw::RawBm25CorpusStats,
+    Vec<RawTermId>,
+) {
+    const QUERY_TERM: RawTermId = 7;
+    const COLD_DOCS: u32 = 4096;
+    const HOT_TAIL_DOCS: u32 = 128;
+
+    let dir = tempfile::tempdir().unwrap();
+    let query = vec![QUERY_TERM];
+    let first_docs = vec![vec![(QUERY_TERM, 1_000)]; 10];
+    let second_docs: Vec<_> = (0..COLD_DOCS)
+        .map(|doc_id| {
+            if doc_id >= COLD_DOCS - HOT_TAIL_DOCS {
+                vec![(QUERY_TERM, 10_000)]
+            } else {
+                vec![(QUERY_TERM, 1)]
+            }
+        })
+        .collect();
+    let mut segments = vec![
+        write_raw_file(&dir, "seeded-block-hot.raw", &first_docs, 0),
+        write_raw_file(&dir, "seeded-block-tail.raw", &second_docs, 10_000),
+    ];
+    let mut segment_refs: Vec<_> = segments.iter_mut().collect();
+    let stats = lexir::raw::RawBm25CorpusStats::from_raw_files(&mut segment_refs, &query).unwrap();
+    drop(segment_refs);
+
+    (dir, segments, stats, query)
+}
+
+#[cfg(feature = "raw-segment")]
 fn build_partitioned_raw_files() -> (
     tempfile::TempDir,
     Vec<RawSegmentFile>,
@@ -677,6 +711,23 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
                     10,
                     params,
                     black_box(&prunable_stats),
+                )
+                .unwrap(),
+            );
+        });
+    });
+    let (_seeded_block_dir, mut seeded_block_segments, seeded_block_stats, seeded_block_query) =
+        build_seeded_block_prunable_raw_files();
+    group.bench_function("files_seeded_block_prunes_with_stats", |b| {
+        let mut segments: Vec<_> = seeded_block_segments.iter_mut().collect();
+        b.iter(|| {
+            black_box(
+                lexir::raw::retrieve_bm25_raw_files_with_stats(
+                    black_box(segments.as_mut_slice()),
+                    black_box(seeded_block_query.as_slice()),
+                    10,
+                    params,
+                    black_box(&seeded_block_stats),
                 )
                 .unwrap(),
             );
