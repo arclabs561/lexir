@@ -6,6 +6,8 @@ use lexir::tfidf::{retrieve_tfidf, TfIdfParams};
 use postings::raw::{
     write_u64_u32_segment_sorted_from_iter_to, RawDocument, RawSegmentFile, RawTermId,
 };
+#[cfg(feature = "raw-segment")]
+use postings::PostingsIndex;
 
 const N_DOCS: u32 = 20_000;
 const VOCAB_SIZE: usize = 5_000;
@@ -107,6 +109,20 @@ fn write_raw_file(
     write_u64_u32_segment_sorted_from_iter_to(docs, &mut file).unwrap();
     drop(file);
     RawSegmentFile::open(path).unwrap()
+}
+
+#[cfg(feature = "raw-segment")]
+fn build_raw_live_index(
+    raw_docs: &[Vec<(RawTermId, u32)>],
+    start_doc_id: u32,
+) -> PostingsIndex<RawTermId, u32> {
+    let mut index = PostingsIndex::new();
+    for (doc_offset, terms) in raw_docs.iter().enumerate() {
+        index
+            .add_weighted_document(start_doc_id + doc_offset as u32, terms)
+            .unwrap();
+    }
+    index
 }
 
 #[cfg(feature = "raw-segment")]
@@ -486,6 +502,87 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
                         10,
                         params,
                         black_box(&all_term_stats_64),
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+
+    let live_doc_count = raw_docs.len() / 10;
+    let live_start = raw_docs.len() - live_doc_count;
+    let live_index = build_raw_live_index(&raw_docs[live_start..], live_start as u32);
+    let mixed_chunk_len = raw_docs[..live_start].len().div_ceil(4);
+    let mut mixed_segments: Vec<_> = raw_docs[..live_start]
+        .chunks(mixed_chunk_len)
+        .enumerate()
+        .map(|(chunk_id, chunk)| {
+            write_raw_file(
+                &dir,
+                &format!("mixed-chunk-{chunk_id}.raw"),
+                chunk,
+                (chunk_id * mixed_chunk_len) as u32,
+            )
+        })
+        .collect();
+    let mut mixed_stats_refs: Vec<_> = mixed_segments.iter_mut().collect();
+    let mixed_stats = lexir::raw::RawBm25CorpusStats::from_raw_files_and_index(
+        &mut mixed_stats_refs,
+        &live_index,
+        &multi_query,
+    )
+    .unwrap();
+    drop(mixed_stats_refs);
+    group.bench_with_input(
+        BenchmarkId::new("files_and_live_index_terms", multi_query.len()),
+        &multi_query,
+        |b, query| {
+            let mut segments: Vec<_> = mixed_segments.iter_mut().collect();
+            b.iter(|| {
+                black_box(
+                    lexir::raw::retrieve_bm25_raw_files_and_index(
+                        black_box(segments.as_mut_slice()),
+                        black_box(&live_index),
+                        black_box(query.as_slice()),
+                        10,
+                        params,
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new("files_and_live_index_stats_build", multi_query.len()),
+        &multi_query,
+        |b, query| {
+            b.iter(|| {
+                let mut segments: Vec<_> = mixed_segments.iter_mut().collect();
+                black_box(
+                    lexir::raw::RawBm25CorpusStats::from_raw_files_and_index(
+                        black_box(segments.as_mut_slice()),
+                        black_box(&live_index),
+                        black_box(query.as_slice()),
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new("files_and_live_index_terms_with_stats", multi_query.len()),
+        &multi_query,
+        |b, query| {
+            let mut segments: Vec<_> = mixed_segments.iter_mut().collect();
+            b.iter(|| {
+                black_box(
+                    lexir::raw::retrieve_bm25_raw_files_and_index_with_stats(
+                        black_box(segments.as_mut_slice()),
+                        black_box(&live_index),
+                        black_box(query.as_slice()),
+                        10,
+                        params,
+                        black_box(&mixed_stats),
                     )
                     .unwrap(),
                 );

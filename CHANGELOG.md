@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added raw BM25 benchmark coverage for searching immutable raw segment files
+  together with one live in-memory raw postings shard.
 - Added `RawTermDictionary` for mapping lexical terms to `postings::raw` term
   ids and encoding raw BM25 documents or queries.
 - Added `retrieve_bm25_raw_file_with_search_stats` for single-segment raw BM25
