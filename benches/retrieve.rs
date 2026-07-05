@@ -824,6 +824,30 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
     );
     group.bench_with_input(
         BenchmarkId::new(
+            "files_and_live_index_candidate_terms_with_stats",
+            candidate_docs.len(),
+        ),
+        &multi_query,
+        |b, query| {
+            let mut segments: Vec<_> = mixed_segments.iter_mut().collect();
+            b.iter(|| {
+                black_box(
+                    lexir::raw::retrieve_bm25_raw_files_candidates_and_index_with_stats(
+                        black_box(segments.as_mut_slice()),
+                        black_box(&live_index),
+                        black_box(query.as_slice()),
+                        black_box(candidate_docs.as_slice()),
+                        10,
+                        params,
+                        black_box(&mixed_stats),
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new(
             "files_filtered_and_live_index_terms_with_stats",
             multi_query.len(),
         ),
@@ -836,6 +860,31 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
                         black_box(segments.as_mut_slice()),
                         black_box(&live_index),
                         black_box(query.as_slice()),
+                        10,
+                        params,
+                        black_box(&mixed_filtered_stats),
+                        visible_for_filter_bench,
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new(
+            "files_filtered_and_live_index_candidate_terms_with_stats",
+            candidate_docs.len(),
+        ),
+        &multi_query,
+        |b, query| {
+            let mut segments: Vec<_> = mixed_segments.iter_mut().collect();
+            b.iter(|| {
+                black_box(
+                    lexir::raw::retrieve_bm25_raw_files_filtered_candidates_and_index_with_stats(
+                        black_box(segments.as_mut_slice()),
+                        black_box(&live_index),
+                        black_box(query.as_slice()),
+                        black_box(candidate_docs.as_slice()),
                         10,
                         params,
                         black_box(&mixed_filtered_stats),

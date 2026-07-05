@@ -138,7 +138,11 @@ Use `retrieve_bm25_raw_file_candidates` or
 `retrieve_bm25_raw_files_candidates` when an exact filter has already produced
 candidate doc ids, for example from `postings::positional::raw` phrase or NEAR
 segment-set helpers. Use the positional `_filtered` helpers when the exact
-filter also needs tombstones or newer-version masks.
+filter also needs tombstones or newer-version masks. Use
+`retrieve_bm25_raw_files_candidates_and_index` for exact candidates over sealed
+raw files plus one live raw postings shard; use
+`retrieve_bm25_raw_files_filtered_candidates_and_index` when sealed files can
+contain stale copies hidden by a lifecycle layer.
 Use `retrieve_bm25_raw_file_filtered` or
 `retrieve_bm25_raw_files_filtered` when a lifecycle layer exposes tombstones or
 newer-version masks. The predicate is applied while building BM25 corpus stats

@@ -1459,6 +1459,124 @@ pub fn retrieve_bm25_raw_files_candidates_with_stats(
     Ok(top_k_positive_scored_docs(hits, k))
 }
 
+/// Rank caller-supplied candidate documents across file-backed raw segments
+/// plus one live in-memory raw postings shard as one BM25 corpus.
+///
+/// Raw segment document ids and live-shard document ids must already be
+/// globally unique among live documents. The caller owns any delete mask,
+/// update policy, or manifest rule needed to keep those sets disjoint.
+pub fn retrieve_bm25_raw_files_candidates_and_index(
+    segments: &mut [&mut RawSegmentFile],
+    live_index: &PostingsIndex<RawTermId, u32>,
+    query_terms: &[RawTermId],
+    candidate_docs: &[DocId],
+    k: usize,
+    params: Bm25Params,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    let stats = RawBm25CorpusStats::from_raw_files_and_index(segments, live_index, query_terms)?;
+    retrieve_bm25_raw_files_candidates_and_index_with_stats(
+        segments,
+        live_index,
+        query_terms,
+        candidate_docs,
+        k,
+        params,
+        &stats,
+    )
+}
+
+/// Rank caller-supplied candidate documents across file-backed raw segments
+/// plus one live in-memory raw postings shard using caller-provided corpus
+/// stats.
+///
+/// Passing shared corpus stats keeps BM25 IDF and length normalization
+/// consistent across sealed files and the live shard.
+pub fn retrieve_bm25_raw_files_candidates_and_index_with_stats(
+    segments: &mut [&mut RawSegmentFile],
+    live_index: &PostingsIndex<RawTermId, u32>,
+    query_terms: &[RawTermId],
+    candidate_docs: &[DocId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>> {
+    retrieve_bm25_raw_files_filtered_candidates_and_index_with_stats(
+        segments,
+        live_index,
+        query_terms,
+        candidate_docs,
+        k,
+        params,
+        stats,
+        |_| true,
+    )
+}
+
+/// Rank caller-supplied candidate documents across visible sealed raw segments
+/// plus one live in-memory raw postings shard as one BM25 corpus.
+///
+/// The visibility predicate is applied only to sealed raw files. The live shard
+/// is treated as already current, so update layers can hide stale sealed copies
+/// while still ranking replacement documents from the live shard.
+pub fn retrieve_bm25_raw_files_filtered_candidates_and_index<F>(
+    segments: &mut [&mut RawSegmentFile],
+    live_index: &PostingsIndex<RawTermId, u32>,
+    query_terms: &[RawTermId],
+    candidate_docs: &[DocId],
+    k: usize,
+    params: Bm25Params,
+    is_visible: F,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>>
+where
+    F: Fn(DocId) -> bool,
+{
+    let stats = RawBm25CorpusStats::from_raw_files_filtered_and_index(
+        segments,
+        live_index,
+        query_terms,
+        &is_visible,
+    )?;
+    retrieve_bm25_raw_files_filtered_candidates_and_index_with_stats(
+        segments,
+        live_index,
+        query_terms,
+        candidate_docs,
+        k,
+        params,
+        &stats,
+        is_visible,
+    )
+}
+
+/// Rank caller-supplied candidate documents across visible sealed raw segments
+/// plus one live in-memory raw postings shard using caller-provided filtered
+/// corpus stats.
+#[allow(clippy::too_many_arguments)]
+pub fn retrieve_bm25_raw_files_filtered_candidates_and_index_with_stats<F>(
+    segments: &mut [&mut RawSegmentFile],
+    live_index: &PostingsIndex<RawTermId, u32>,
+    query_terms: &[RawTermId],
+    candidate_docs: &[DocId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+    is_visible: F,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>>
+where
+    F: Fn(DocId) -> bool,
+{
+    retrieve_bm25_raw_files_candidates_and_index_with_stats_filtered(
+        segments,
+        live_index,
+        query_terms,
+        candidate_docs,
+        k,
+        params,
+        stats,
+        &is_visible,
+    )
+}
+
 /// Retrieve top-k documents across file-backed raw segments after applying a
 /// caller-owned document visibility filter.
 ///
@@ -2001,6 +2119,69 @@ where
         params,
         stats,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retrieve_bm25_raw_files_candidates_and_index_with_stats_filtered<F>(
+    segments: &mut [&mut RawSegmentFile],
+    live_index: &PostingsIndex<RawTermId, u32>,
+    query_terms: &[RawTermId],
+    candidate_docs: &[DocId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+    is_visible: &F,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>>
+where
+    F: Fn(DocId) -> bool,
+{
+    if query_terms.is_empty() {
+        return Err(RawScoringError::EmptyQuery);
+    }
+    if stats.num_docs() == 0 {
+        return Err(RawScoringError::EmptyIndex);
+    }
+    if k == 0 || candidate_docs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let candidates = sorted_unique_doc_ids(candidate_docs);
+    let mut hits = Vec::with_capacity(k.saturating_mul(segments.len().saturating_add(1)));
+
+    if live_index.num_docs() > 0 {
+        let mut live_reader = live_index;
+        hits.extend(
+            retrieve_bm25_raw_candidates_with_stats_sorted(
+                &mut live_reader,
+                query_terms,
+                &candidates,
+                k,
+                params,
+                stats,
+            )
+            .map_err(raw_infallible_error)?,
+        );
+    }
+
+    let sealed_candidates = candidates
+        .iter()
+        .copied()
+        .filter(|doc_id| is_visible(*doc_id))
+        .collect::<Vec<_>>();
+    if !sealed_candidates.is_empty() {
+        for segment in segments {
+            hits.extend(retrieve_bm25_raw_candidates_with_stats_sorted(
+                *segment,
+                query_terms,
+                &sealed_candidates,
+                k,
+                params,
+                stats,
+            )?);
+        }
+    }
+
+    Ok(top_k_positive_scored_docs(hits, k))
 }
 
 fn retrieve_bm25_raw_candidates_with_stats_sorted<S>(
@@ -3701,6 +3882,64 @@ mod tests {
     }
 
     #[test]
+    fn raw_bm25_file_candidates_and_live_index_match_in_memory_index() {
+        let sealed = [
+            (1, vec![(10, 3), (20, 1)]),
+            (2, vec![(20, 5)]),
+            (3, vec![(30, 1)]),
+        ];
+        let live = [
+            (10, vec![(10, 1), (30, 7)]),
+            (11, vec![(20, 2), (40, 10)]),
+            (12, vec![(10, 4), (40, 1)]),
+        ];
+        let mut index = InvertedIndex::new();
+        let mut live_index = PostingsIndex::new();
+        for (doc_id, terms) in sealed.iter().chain(live.iter()) {
+            add_raw_doc_to_memory_index(&mut index, *doc_id, terms);
+            if *doc_id >= 10 {
+                live_index.add_weighted_document(*doc_id, terms).unwrap();
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let sealed_path = dir.path().join("sealed.raw");
+        std::fs::write(&sealed_path, build_raw_bytes_with_doc_ids(&sealed)).unwrap();
+        let mut sealed_segment = RawSegmentFile::open(&sealed_path).unwrap();
+        let query = vec![10, 30, 10, 40];
+        let candidates = vec![12, 1, 11, 12, 999];
+        let mut segments = [&mut sealed_segment];
+
+        let stats =
+            RawBm25CorpusStats::from_raw_files_and_index(&mut segments, &live_index, &query)
+                .unwrap();
+        let got = retrieve_bm25_raw_files_candidates_and_index_with_stats(
+            &mut segments,
+            &live_index,
+            &query,
+            &candidates,
+            10,
+            Bm25Params::default(),
+            &stats,
+        )
+        .unwrap();
+        let auto_stats_got = retrieve_bm25_raw_files_candidates_and_index(
+            &mut segments,
+            &live_index,
+            &query,
+            &candidates,
+            10,
+            Bm25Params::default(),
+        )
+        .unwrap();
+        let expected =
+            raw_bm25_memory_candidate_hits(&index, &query, &candidates, 10, Bm25Params::default());
+
+        assert_hits_close(&expected, &got, "raw files plus live shard candidate BM25");
+        assert_eq!(auto_stats_got, got);
+    }
+
+    #[test]
     fn raw_bm25_files_filtered_keeps_deleted_docs_out_of_top_k_threshold() {
         fn visible(doc_id: DocId) -> bool {
             doc_id != 1
@@ -3834,6 +4073,86 @@ mod tests {
             &live_expected,
             &live_hits,
             "filtered sealed files plus live shard, live term",
+        );
+    }
+
+    #[test]
+    fn raw_bm25_filtered_file_candidates_and_live_index_treats_live_as_current() {
+        fn visible_sealed(doc_id: DocId) -> bool {
+            doc_id != 1
+        }
+
+        let sealed = vec![(1, vec![(7, 100)]), (2, vec![(7, 4)])];
+        let live = vec![(1, vec![(9, 8)])];
+        let mut visible_docs = vec![(2, vec![(7, 4)]), (1, vec![(9, 8)])];
+        visible_docs.sort_unstable_by_key(|(doc_id, _)| *doc_id);
+        let index = build_memory_index_with_doc_ids(&visible_docs);
+        let mut live_index = PostingsIndex::new();
+        for (doc_id, terms) in &live {
+            live_index.add_weighted_document(*doc_id, terms).unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sealed.raw");
+        std::fs::write(&path, build_raw_bytes_with_doc_ids(&sealed)).unwrap();
+        let mut segment = RawSegmentFile::open(&path).unwrap();
+        let mut segments = [&mut segment];
+
+        let stale_query = vec![7];
+        let candidates = vec![1, 2, 1, 999];
+        let stale_expected = raw_bm25_memory_candidate_hits(
+            &index,
+            &stale_query,
+            &candidates,
+            10,
+            Bm25Params::default(),
+        );
+        let stale_stats = RawBm25CorpusStats::from_raw_files_filtered_and_index(
+            &mut segments,
+            &live_index,
+            &stale_query,
+            visible_sealed,
+        )
+        .unwrap();
+        let stale_hits = retrieve_bm25_raw_files_filtered_candidates_and_index_with_stats(
+            &mut segments,
+            &live_index,
+            &stale_query,
+            &candidates,
+            10,
+            Bm25Params::default(),
+            &stale_stats,
+            visible_sealed,
+        )
+        .unwrap();
+        assert_hits_close(
+            &stale_expected,
+            &stale_hits,
+            "filtered sealed files plus live shard candidates, stale term",
+        );
+
+        let live_query = vec![9];
+        let live_expected = raw_bm25_memory_candidate_hits(
+            &index,
+            &live_query,
+            &candidates,
+            10,
+            Bm25Params::default(),
+        );
+        let live_hits = retrieve_bm25_raw_files_filtered_candidates_and_index(
+            &mut segments,
+            &live_index,
+            &live_query,
+            &candidates,
+            10,
+            Bm25Params::default(),
+            visible_sealed,
+        )
+        .unwrap();
+        assert_hits_close(
+            &live_expected,
+            &live_hits,
+            "filtered sealed files plus live shard candidates, live term",
         );
     }
 

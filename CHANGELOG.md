@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added sealed-file plus live-shard raw BM25 candidate-ranking helpers,
+  including a filtered sealed-file variant for update layers with stale sealed
+  copies.
 - Added filtered sealed-file plus live-shard raw BM25 helpers, so streaming
   ingestion paths can hide stale sealed documents while still searching the
   current live shard.
