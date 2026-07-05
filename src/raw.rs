@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::fmt;
 use std::io::{Seek, Write};
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -201,6 +202,27 @@ impl RawTermDictionary {
     }
 }
 
+/// Policy for deciding when a live raw BM25 shard is ready to seal.
+///
+/// The policy only describes the in-memory buffer boundary. Callers still own
+/// durable writes, manifest publication, retention, deletes, and compaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RawBm25SealPolicy {
+    max_live_docs: NonZeroU32,
+}
+
+impl RawBm25SealPolicy {
+    /// Seal once the live shard has at least `max_live_docs` documents.
+    pub const fn after_live_docs(max_live_docs: NonZeroU32) -> Self {
+        Self { max_live_docs }
+    }
+
+    /// Return the maximum number of live documents before sealing.
+    pub const fn max_live_docs(self) -> NonZeroU32 {
+        self.max_live_docs
+    }
+}
+
 /// Bounded live shard for raw BM25 ingestion.
 ///
 /// This helper owns only lexical-term encoding and the current in-memory raw
@@ -249,6 +271,12 @@ impl RawBm25LiveShard {
     /// Return true when no live documents are currently buffered.
     pub fn is_live_empty(&self) -> bool {
         self.live.num_docs() == 0
+    }
+
+    /// Return true when the live shard has reached a caller-selected seal
+    /// policy.
+    pub fn should_seal(&self, policy: RawBm25SealPolicy) -> bool {
+        self.live_doc_count() >= policy.max_live_docs().get()
     }
 
     /// Add a tokenized document to the live shard.
@@ -3319,6 +3347,24 @@ mod tests {
 
         assert_eq!(hits.first().map(|(doc_id, _)| *doc_id), Some(10));
         assert_eq!(shard.live_doc_count(), 3);
+    }
+
+    #[test]
+    fn raw_bm25_live_shard_seal_policy_tracks_live_doc_count() {
+        let policy = RawBm25SealPolicy::after_live_docs(NonZeroU32::new(2).unwrap());
+        let mut shard = RawBm25LiveShard::new();
+
+        assert_eq!(policy.max_live_docs().get(), 2);
+        assert!(!shard.should_seal(policy));
+
+        shard.add_document(1, ["alpha"]).unwrap();
+        assert!(!shard.should_seal(policy));
+
+        shard.add_document(2, ["beta"]).unwrap();
+        assert!(shard.should_seal(policy));
+
+        shard.clear_live();
+        assert!(!shard.should_seal(policy));
     }
 
     #[test]

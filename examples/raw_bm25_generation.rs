@@ -4,15 +4,16 @@
 //! `cargo run --example raw_bm25_generation --features raw-segment`
 
 use std::io::Write;
+use std::num::NonZeroU32;
 
 use lexir::bm25::Bm25Params;
 use lexir::raw::{
     retrieve_bm25_raw_files_and_index_with_diagnostics, RawBm25CorpusStats, RawBm25LiveShard,
-    RawTermDictionary,
+    RawBm25SealPolicy, RawTermDictionary,
 };
 use postings::raw::RawSegmentFile;
 
-const SEAL_AFTER_DOCS: usize = 3;
+const SEAL_AFTER_DOCS: u32 = 3;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let corpus = [
@@ -54,15 +55,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     let dir = tempfile::tempdir()?;
+    let seal_policy = RawBm25SealPolicy::after_live_docs(
+        NonZeroU32::new(SEAL_AFTER_DOCS).expect("seal threshold must be non-zero"),
+    );
     let mut ingest = RawBm25LiveShard::new();
-    let mut live_docs = 0usize;
     let mut sealed_paths = Vec::new();
 
     for document in &corpus {
         ingest.add_document(document.id, document.terms)?;
-        live_docs += 1;
 
-        if live_docs == SEAL_AFTER_DOCS {
+        if ingest.should_seal(seal_policy) {
             let path = dir
                 .path()
                 .join(format!("generation-{}.raw", sealed_paths.len()));
@@ -73,7 +75,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             sealed_paths.push(path);
             ingest.clear_live();
-            live_docs = 0;
         }
     }
 
@@ -104,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("dictionary terms: {}", loaded_dictionary.len());
     println!("sealed raw files: {}", sealed_paths.len());
-    println!("live docs: {}", live_docs);
+    println!("live docs: {}", ingest.live_doc_count());
     println!(
         "sealed files seen/scored/pruned: {}/{}/{}",
         result.diagnostics.segments.segments_seen,
