@@ -773,6 +773,36 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
         });
     });
     group.bench_with_input(
+        BenchmarkId::new(
+            "files_filtered_and_live_index_stats_build",
+            multi_query.len(),
+        ),
+        &multi_query,
+        |b, query| {
+            b.iter(|| {
+                let mut segments: Vec<_> = mixed_segments.iter_mut().collect();
+                black_box(
+                    lexir::raw::RawBm25CorpusStats::from_raw_files_filtered_and_index(
+                        black_box(segments.as_mut_slice()),
+                        black_box(&live_index),
+                        black_box(query.as_slice()),
+                        visible_for_filter_bench,
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+    let mut mixed_filtered_stats_refs: Vec<_> = mixed_segments.iter_mut().collect();
+    let mixed_filtered_stats = lexir::raw::RawBm25CorpusStats::from_raw_files_filtered_and_index(
+        &mut mixed_filtered_stats_refs,
+        &live_index,
+        &multi_query,
+        visible_for_filter_bench,
+    )
+    .unwrap();
+    drop(mixed_filtered_stats_refs);
+    group.bench_with_input(
         BenchmarkId::new("files_and_live_index_terms_with_stats", multi_query.len()),
         &multi_query,
         |b, query| {
@@ -786,6 +816,30 @@ fn bench_raw_bm25_retrieve(c: &mut Criterion) {
                         10,
                         params,
                         black_box(&mixed_stats),
+                    )
+                    .unwrap(),
+                );
+            });
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new(
+            "files_filtered_and_live_index_terms_with_stats",
+            multi_query.len(),
+        ),
+        &multi_query,
+        |b, query| {
+            let mut segments: Vec<_> = mixed_segments.iter_mut().collect();
+            b.iter(|| {
+                black_box(
+                    lexir::raw::retrieve_bm25_raw_files_filtered_and_index_with_stats(
+                        black_box(segments.as_mut_slice()),
+                        black_box(&live_index),
+                        black_box(query.as_slice()),
+                        10,
+                        params,
+                        black_box(&mixed_filtered_stats),
+                        visible_for_filter_bench,
                     )
                     .unwrap(),
                 );

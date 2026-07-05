@@ -622,6 +622,79 @@ impl RawBm25CorpusStats {
         })
     }
 
+    /// Build query-scoped corpus stats from visible documents in file-backed
+    /// raw segments plus all documents in one live in-memory raw postings shard.
+    ///
+    /// The visibility predicate is applied only to sealed raw files. The live
+    /// shard is treated as already current, which lets an update layer hide an
+    /// older sealed copy of a document while searching its replacement in the
+    /// live shard.
+    pub fn from_raw_files_filtered_and_index<F>(
+        segments: &mut [&mut RawSegmentFile],
+        live_index: &PostingsIndex<RawTermId, u32>,
+        query_terms: &[RawTermId],
+        is_visible: F,
+    ) -> Result<Self, RawScoringError<RawSegmentFileError>>
+    where
+        F: Fn(DocId) -> bool,
+    {
+        if query_terms.is_empty() {
+            return Err(RawScoringError::EmptyQuery);
+        }
+
+        let terms = raw_term_multiplicities(query_terms);
+        let mut num_docs = 0u32;
+        let mut total_doc_len = 0.0f64;
+        let mut dfs = HashMap::with_capacity(terms.len());
+        for term in &terms {
+            dfs.insert(term.term_id, 0u32);
+        }
+
+        for segment in segments.iter_mut() {
+            segment
+                .for_each_document_len(|doc_id, doc_len| {
+                    if is_visible(doc_id) {
+                        num_docs = num_docs.saturating_add(1);
+                        total_doc_len += doc_len as f64;
+                    }
+                })
+                .map_err(RawScoringError::Source)?;
+
+            for term in &terms {
+                let mut live_df = 0u32;
+                segment
+                    .for_each_posting_with_document_len(term.term_id, |doc_id, _, _| {
+                        if is_visible(doc_id) {
+                            live_df = live_df.saturating_add(1);
+                        }
+                    })
+                    .map_err(RawScoringError::Source)?;
+                if let Some(total_df) = dfs.get_mut(&term.term_id) {
+                    *total_df = total_df.saturating_add(live_df);
+                }
+            }
+        }
+
+        let live_docs = live_index.num_docs();
+        num_docs = num_docs.saturating_add(live_docs);
+        total_doc_len += live_index.avg_doc_len() as f64 * live_docs as f64;
+        for term in &terms {
+            if let Some(total_df) = dfs.get_mut(&term.term_id) {
+                *total_df = total_df.saturating_add(live_index.df(&term.term_id));
+            }
+        }
+
+        if num_docs == 0 {
+            return Err(RawScoringError::EmptyIndex);
+        }
+
+        Ok(Self {
+            num_docs,
+            avg_doc_len: (total_doc_len / num_docs as f64) as f32,
+            dfs,
+        })
+    }
+
     /// Build query-scoped corpus stats from file-backed raw segments and one
     /// live in-memory raw postings shard.
     ///
@@ -1437,6 +1510,98 @@ where
         &is_visible,
     )
     .map(|result| result.hits)
+}
+
+/// Retrieve top-k documents across visible sealed raw segments plus one live
+/// in-memory raw postings shard as one BM25 corpus.
+///
+/// The visibility predicate is applied only to sealed raw files. The live shard
+/// is treated as already current, so update layers can hide stale sealed copies
+/// while still serving replacement documents from the live shard.
+pub fn retrieve_bm25_raw_files_filtered_and_index<F>(
+    segments: &mut [&mut RawSegmentFile],
+    live_index: &PostingsIndex<RawTermId, u32>,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    is_visible: F,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>>
+where
+    F: Fn(DocId) -> bool,
+{
+    let stats = RawBm25CorpusStats::from_raw_files_filtered_and_index(
+        segments,
+        live_index,
+        query_terms,
+        &is_visible,
+    )?;
+    retrieve_bm25_raw_files_filtered_and_index_with_stats(
+        segments,
+        live_index,
+        query_terms,
+        k,
+        params,
+        &stats,
+        is_visible,
+    )
+}
+
+/// Retrieve top-k documents across visible sealed raw segments plus one live
+/// in-memory raw postings shard using caller-provided filtered corpus stats.
+pub fn retrieve_bm25_raw_files_filtered_and_index_with_stats<F>(
+    segments: &mut [&mut RawSegmentFile],
+    live_index: &PostingsIndex<RawTermId, u32>,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+    is_visible: F,
+) -> Result<Vec<(DocId, f32)>, RawScoringError<RawSegmentFileError>>
+where
+    F: Fn(DocId) -> bool,
+{
+    retrieve_bm25_raw_files_filtered_and_index_with_diagnostics(
+        segments,
+        live_index,
+        query_terms,
+        k,
+        params,
+        stats,
+        is_visible,
+    )
+    .map(|result| result.hits)
+}
+
+/// Retrieve top-k documents across visible sealed raw segment files plus one
+/// live in-memory raw postings shard and return sealed-file traversal
+/// diagnostics.
+pub fn retrieve_bm25_raw_files_filtered_and_index_with_diagnostics<F>(
+    segments: &mut [&mut RawSegmentFile],
+    live_index: &PostingsIndex<RawTermId, u32>,
+    query_terms: &[RawTermId],
+    k: usize,
+    params: Bm25Params,
+    stats: &RawBm25CorpusStats,
+    is_visible: F,
+) -> Result<RawBm25DiagnosticSearchResult, RawScoringError<RawSegmentFileError>>
+where
+    F: Fn(DocId) -> bool,
+{
+    let mut live_hits = Vec::new();
+    if live_index.num_docs() > 0 && k > 0 {
+        let mut live_reader = live_index;
+        live_hits = retrieve_bm25_raw_with_stats(&mut live_reader, query_terms, k, params, stats)
+            .map_err(raw_infallible_error)?;
+    }
+    retrieve_bm25_raw_files_with_diagnostics_seeded_filtered(
+        segments,
+        query_terms,
+        k,
+        params,
+        stats,
+        live_hits,
+        &is_visible,
+    )
 }
 
 /// Retrieve top-k documents across file-backed raw segments and one live
@@ -3594,6 +3759,82 @@ mod tests {
         .unwrap();
 
         assert_hits_close(&expected, &filtered, "multi-file filtered");
+    }
+
+    #[test]
+    fn raw_bm25_files_filtered_and_live_index_treats_live_as_current() {
+        fn visible_sealed(doc_id: DocId) -> bool {
+            doc_id != 1
+        }
+
+        let sealed = vec![(1, vec![(7, 100)]), (2, vec![(7, 4)])];
+        let live = vec![(1, vec![(9, 8)])];
+        let mut visible_docs = vec![(2, vec![(7, 4)]), (1, vec![(9, 8)])];
+        visible_docs.sort_unstable_by_key(|(doc_id, _)| *doc_id);
+        let index = build_memory_index_with_doc_ids(&visible_docs);
+        let mut live_index = PostingsIndex::new();
+        for (doc_id, terms) in &live {
+            live_index.add_weighted_document(*doc_id, terms).unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sealed.raw");
+        std::fs::write(&path, build_raw_bytes_with_doc_ids(&sealed)).unwrap();
+        let mut segment = RawSegmentFile::open(&path).unwrap();
+        let mut segments = [&mut segment];
+
+        let stale_query = vec![7];
+        let stale_expected = raw_bm25_memory_hits(&index, &stale_query, 1, Bm25Params::default());
+        let stale_stats = RawBm25CorpusStats::from_raw_files_filtered_and_index(
+            &mut segments,
+            &live_index,
+            &stale_query,
+            visible_sealed,
+        )
+        .unwrap();
+        assert_eq!(stale_stats.num_docs(), 2);
+        assert_eq!(stale_stats.df(7), Some(1));
+        let stale_hits = retrieve_bm25_raw_files_filtered_and_index_with_stats(
+            &mut segments,
+            &live_index,
+            &stale_query,
+            1,
+            Bm25Params::default(),
+            &stale_stats,
+            visible_sealed,
+        )
+        .unwrap();
+        assert_hits_close(
+            &stale_expected,
+            &stale_hits,
+            "filtered sealed files plus live shard, stale term",
+        );
+
+        let live_query = vec![9];
+        let live_expected = raw_bm25_memory_hits(&index, &live_query, 1, Bm25Params::default());
+        let live_stats = RawBm25CorpusStats::from_raw_files_filtered_and_index(
+            &mut segments,
+            &live_index,
+            &live_query,
+            visible_sealed,
+        )
+        .unwrap();
+        assert_eq!(live_stats.num_docs(), 2);
+        assert_eq!(live_stats.df(9), Some(1));
+        let live_hits = retrieve_bm25_raw_files_filtered_and_index(
+            &mut segments,
+            &live_index,
+            &live_query,
+            1,
+            Bm25Params::default(),
+            visible_sealed,
+        )
+        .unwrap();
+        assert_hits_close(
+            &live_expected,
+            &live_hits,
+            "filtered sealed files plus live shard, live term",
+        );
     }
 
     #[test]

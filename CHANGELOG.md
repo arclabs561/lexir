@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added filtered sealed-file plus live-shard raw BM25 helpers, so streaming
+  ingestion paths can hide stale sealed documents while still searching the
+  current live shard.
+
 ## [0.2.11] - 2026-07-05
 
 ### Added

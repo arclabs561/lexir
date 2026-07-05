@@ -147,6 +147,8 @@ For streaming ingestion, `retrieve_bm25_raw_files_and_index` searches sealed
 raw segment files plus one live `postings::PostingsIndex<u64, u32>` shard with
 shared BM25 corpus stats, scoring the live shard first so its top-k threshold
 can skip low-bound sealed files.
+Use `retrieve_bm25_raw_files_filtered_and_index` when sealed files need a
+visibility predicate but the live shard is already current.
 Use `retrieve_bm25_raw_file_with_search_stats` for single-segment traversal
 diagnostics and `retrieve_bm25_raw_files_with_search_stats` for searched/pruned
 segment counts. `retrieve_bm25_raw_files_with_diagnostics` also aggregates
