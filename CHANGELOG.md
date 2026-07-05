@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `RawBm25SealPolicy` and `RawBm25LiveShard::should_seal` so streaming
   raw BM25 ingestion can centralize live-shard cutover decisions.
 
+### Changed
+
+- Bumped the `postings` dependency to 0.2.13 for filtered raw positional
+  segment-set helpers.
+
 ## [0.2.10] - 2026-07-04
 
 ### Added

@@ -137,7 +137,8 @@ BM25 upper bound and can skip segments that cannot enter the current top-k.
 Use `retrieve_bm25_raw_file_candidates` or
 `retrieve_bm25_raw_files_candidates` when an exact filter has already produced
 candidate doc ids, for example from `postings::positional::raw` phrase or NEAR
-matching.
+segment-set helpers. Use the positional `_filtered` helpers when the exact
+filter also needs tombstones or newer-version masks.
 Use `retrieve_bm25_raw_file_filtered` or
 `retrieve_bm25_raw_files_filtered` when a lifecycle layer exposes tombstones or
 newer-version masks. The predicate is applied while building BM25 corpus stats
