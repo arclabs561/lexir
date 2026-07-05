@@ -8,7 +8,8 @@ use std::num::NonZeroU32;
 
 use lexir::bm25::Bm25Params;
 use lexir::raw::{
-    retrieve_bm25_raw_files_and_index_with_diagnostics, RawBm25CorpusStats, RawBm25LiveShard,
+    retrieve_bm25_raw_files_and_index_with_diagnostics,
+    retrieve_bm25_raw_files_candidates_and_index_with_stats, RawBm25CorpusStats, RawBm25LiveShard,
     RawBm25SealPolicy, RawTermDictionary,
 };
 use postings::raw::RawSegmentFile;
@@ -114,6 +115,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("top BM25 hits:");
     for (doc_id, score) in result.hits {
+        println!("  doc {doc_id}: {score:.6}  {}", title(doc_id, &corpus));
+    }
+
+    let exact_filter_candidates = [10, 14, 16];
+    let candidate_hits = retrieve_bm25_raw_files_candidates_and_index_with_stats(
+        &mut segment_refs,
+        ingest.live_index(),
+        &query,
+        &exact_filter_candidates,
+        5,
+        Bm25Params::default(),
+        &stats,
+    )?;
+    println!("candidate-filtered BM25 hits:");
+    for (doc_id, score) in candidate_hits {
         println!("  doc {doc_id}: {score:.6}  {}", title(doc_id, &corpus));
     }
 

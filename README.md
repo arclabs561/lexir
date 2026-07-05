@@ -180,7 +180,8 @@ compaction.
 `cargo run --example raw_bm25_generation --features raw-segment` shows the
 streaming ingestion pattern: encode lexical documents into a live numeric shard,
 seal full shards to raw files, persist the dictionary sidecar, reload it, and
-search sealed files plus the remaining live shard.
+search sealed files plus the remaining live shard, including a prefiltered
+candidate-ranking pass.
 
 The caller owns commit lifecycle, deletes, dictionary persistence, and segment
 merge policy.
