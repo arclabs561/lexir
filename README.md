@@ -7,7 +7,7 @@ Lexical scoring over postings lists.
 
 **Status**: experimental. Published on `crates.io`; the API may still shift.
 
-## What it is
+## Scope
 
 `lexir` is the scoring/ranking layer. Candidate generation and storage live in `postings`.
 Exact filters such as phrase/proximity matching should produce candidate doc ids,
