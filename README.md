@@ -2,7 +2,6 @@
 
 [![crates.io](https://img.shields.io/crates/v/lexir.svg)](https://crates.io/crates/lexir)
 [![Documentation](https://docs.rs/lexir/badge.svg)](https://docs.rs/lexir)
-[![CI](https://github.com/arclabs561/lexir/actions/workflows/ci.yml/badge.svg)](https://github.com/arclabs561/lexir/actions/workflows/ci.yml)
 
 Lexical scoring over postings lists.
 
