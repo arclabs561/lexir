@@ -8,11 +8,6 @@ Lexical scoring over postings lists.
 
 **Status**: experimental. Published on `crates.io`; the API may still shift.
 
-## Feature Selection
-
-- **`default`**: Includes `persistence`.
-- **In-memory only**: disable default features.
-
 ## What it is
 
 `lexir` is the scoring/ranking layer. Candidate generation and storage live in `postings`.
@@ -38,18 +33,10 @@ merges. Those stay with `postings`, the caller, or a storage layer above
 
 ## Building
 
-Add from `crates.io`:
-
 ```toml
 [dependencies]
 lexir = "0.2"
 ```
-
-Notes:
-
-- Optional persistence, CLI, and fuzzy-search dependencies are enabled only by
-  their feature flags.
-- The `fuzzy` feature uses `gramdex` for k-gram candidate generation.
 
 ## Usage (library)
 
@@ -128,63 +115,10 @@ in-memory `InvertedIndex`:
 lexir = { version = "0.2", features = ["raw-segment"] }
 ```
 
-`lexir::raw::retrieve_bm25_raw_file` scores one segment using that segment's
-local document frequencies. For an immutable segment set, use
-`retrieve_bm25_raw_files` or build `RawBm25CorpusStats` once and pass it to
-`retrieve_bm25_raw_files_with_stats`, so every segment uses the same IDF and
-average document length. The multi-file path orders segments by a conservative
-BM25 upper bound and can skip segments that cannot enter the current top-k.
-Use `retrieve_bm25_raw_file_candidates` or
-`retrieve_bm25_raw_files_candidates` when an exact filter has already produced
-candidate doc ids, for example from `postings::positional::raw` phrase or NEAR
-segment-set helpers. Use the positional `_filtered` helpers when the exact
-filter also needs tombstones or newer-version masks. Use
-`retrieve_bm25_raw_files_candidates_and_index` for exact candidates over sealed
-raw files plus one live raw postings shard; use
-`retrieve_bm25_raw_files_filtered_candidates_and_index` when sealed files can
-contain stale copies hidden by a lifecycle layer.
-Use `retrieve_bm25_raw_file_filtered` or
-`retrieve_bm25_raw_files_filtered` when a lifecycle layer exposes tombstones or
-newer-version masks. The predicate is applied while building BM25 corpus stats
-and while scoring, so stale docs cannot fill a top-k slot before filtering.
-For streaming ingestion, `retrieve_bm25_raw_files_and_index` searches sealed
-raw segment files plus one live `postings::PostingsIndex<u64, u32>` shard with
-shared BM25 corpus stats, scoring the live shard first so its top-k threshold
-can skip low-bound sealed files.
-Use `retrieve_bm25_raw_files_filtered_and_index` when sealed files need a
-visibility predicate but the live shard is already current.
-Use `retrieve_bm25_raw_file_with_search_stats` for single-segment traversal
-diagnostics and `retrieve_bm25_raw_files_with_search_stats` for searched/pruned
-segment counts. `retrieve_bm25_raw_files_with_diagnostics` also aggregates
-file traversal counters such as raw posting blocks seen, scored, and pruned;
-`cargo run --release --example raw_bm25_benefits --features raw-segment` prints
-those counters for deterministic pruning fixtures. `RawBm25CorpusStats::from_raw_files_all_terms`
-builds reusable stats for all terms in a raw segment generation without reading
-postings payloads; `from_raw_files_and_index_all_terms` does the same for sealed
-files plus one live shard. File-backed BM25 can also use raw posting-block
-metadata to skip blocks that cannot enter the current top-k. Segment document
-ids must already be globally unique.
-
-`RawTermDictionary` is an in-process adapter from lexical terms to numeric raw
-term ids. `insert` assigns ids in insertion order; `from_terms_sorted` assigns
-ids from sorted unique terms for reproducible offline builds. Export
-`RawTermDictionary::terms` as a term-id-ordered sidecar and reload it with
-`RawTermDictionary::from_terms_in_id_order`.
-`RawBm25LiveShard` pairs that dictionary with one bounded live
-`postings::PostingsIndex<u64, u32>` shard, can add token streams, encode
-queries, decide when the live shard reaches a caller-selected
-`RawBm25SealPolicy`, and seal the live shard to a caller-provided raw segment
-writer. It does not own paths, commits, durable publication, retention, or
-compaction.
-
-`cargo run --example raw_bm25_generation --features raw-segment` shows the
-streaming ingestion pattern: encode lexical documents into a live numeric shard,
-seal full shards to raw files, persist the dictionary sidecar, reload it, and
-search sealed files plus the remaining live shard, including a prefiltered
-candidate-ranking pass.
-
-The caller owns commit lifecycle, deletes, dictionary persistence, and segment
-merge policy.
+Use this path for immutable segment sets or streaming ingestion where a bounded
+live shard is searched with sealed raw files. The caller still owns term-id
+mapping, commit publication, deletes, dictionary persistence, and segment merge
+policy. See [docs/raw-bm25.md](docs/raw-bm25.md) for the detailed API map.
 
 ## Features
 
