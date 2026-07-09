@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Updated `postings` to 0.4 and the optional persistence dependency to
+  `durability` 0.7.1, keeping raw BM25 and persisted BM25 helpers on the same
+  durability version.
+
 ## [0.2.12] - 2026-07-05
 
 ### Added
