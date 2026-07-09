@@ -5,7 +5,7 @@ opening a full in-memory `InvertedIndex`:
 
 ```toml
 [dependencies]
-lexir = { version = "0.2", features = ["raw-segment"] }
+lexir = { version = "0.3", features = ["raw-segment"] }
 ```
 
 ## Segment Sets

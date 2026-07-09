@@ -34,7 +34,7 @@ merges. Those stay with `postings`, the caller, or a storage layer above
 
 ```toml
 [dependencies]
-lexir = "0.2"
+lexir = "0.3"
 ```
 
 ## Usage (library)
@@ -111,7 +111,7 @@ in-memory `InvertedIndex`:
 
 ```toml
 [dependencies]
-lexir = { version = "0.2", features = ["raw-segment"] }
+lexir = { version = "0.3", features = ["raw-segment"] }
 ```
 
 Use this path for immutable segment sets or streaming ingestion where a bounded
