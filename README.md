@@ -30,7 +30,7 @@ phrase/proximity execution, raw segment commit lifecycle, deletes, or segment
 merges. Those stay with `postings`, the caller, or a storage layer above
 `postings::raw`.
 
-## Building
+## Install
 
 ```toml
 [dependencies]
@@ -70,6 +70,23 @@ let hits = idx
     )
     .unwrap();
 assert_eq!(hits[0].0, 2);
+```
+
+**Fuzzy expansion for out-of-vocabulary terms** (feature `fuzzy`):
+
+```rust
+use lexir::bm25::{Bm25Params, InvertedIndex};
+use lexir::fuzzy::{expand_query_terms, FuzzyConfig, FuzzyVocab};
+
+let mut idx = InvertedIndex::new();
+idx.add_document(1, &["color".to_string(), "theory".to_string()]);
+
+let cfg = FuzzyConfig { k: 2, min_jaccard: 0.2, ..Default::default() };
+let vocab = FuzzyVocab::from_index_terms(&idx, cfg.k).unwrap();
+let query = vec!["colr".to_string()];
+let expanded = expand_query_terms(&idx, &vocab, &query, &cfg).unwrap();
+let hits = idx.retrieve(&expanded, 10, Bm25Params::default()).unwrap();
+assert_eq!(hits[0].0, 1);
 ```
 
 **TF-IDF** (requires multiple docs for non-zero IDF):
