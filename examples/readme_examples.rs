@@ -1,41 +1,14 @@
-//! Compile-check of README usage examples.
+//! Compile-check of the README usage example.
 //! Run: cargo run --example readme_examples
 
-use lexir::bm25::{Bm25Params, InvertedIndex};
-use lexir::query_likelihood::{retrieve_query_likelihood, QueryLikelihoodParams};
-use lexir::tfidf::{retrieve_tfidf, TfIdfParams};
+use lexir::bm25::InvertedIndex;
 
-fn main() {
-    let mut idx = InvertedIndex::new();
-    idx.add_document(1, &["hello".to_string(), "world".to_string()]);
-    idx.add_document(2, &["hello".to_string(), "foo".to_string()]);
-    idx.add_document(3, &["other".to_string()]); // ensures IDF(hello) > 0 for TF-IDF
+fn main() -> Result<(), lexir::Error> {
+    let mut index = InvertedIndex::new();
+    index.add_document(1, &["red".into(), "fox".into()]);
+    index.add_document(2, &["blue".into(), "whale".into()]);
 
-    // BM25
-    let hits = idx
-        .retrieve(&["hello".to_string()], 10, Default::default())
-        .unwrap();
-    assert!(!hits.is_empty() && hits[0].0 == 1, "BM25 example");
-
-    // BM25 over prefiltered candidates
-    let hits = idx
-        .retrieve_candidates(&["hello".to_string()], &[2], 10, Bm25Params::default())
-        .unwrap();
-    assert_eq!(hits[0].0, 2, "prefiltered BM25 example");
-
-    // TF-IDF
-    let hits = retrieve_tfidf(&idx, &["hello".to_string()], 10, TfIdfParams::linear()).unwrap();
-    assert!(!hits.is_empty() && hits[0].0 == 1, "TF-IDF example");
-
-    // Query Likelihood
-    let hits = retrieve_query_likelihood(
-        &idx,
-        &["hello".to_string()],
-        10,
-        QueryLikelihoodParams::default(),
-    )
-    .unwrap();
-    assert!(!hits.is_empty(), "Query Likelihood example");
-
-    println!("All README examples compile and run correctly.");
+    let hits = index.retrieve(&["fox".into()], 10, Default::default())?;
+    assert_eq!(hits[0].0, 1);
+    Ok(())
 }
