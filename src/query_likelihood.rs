@@ -8,7 +8,7 @@
 
 use crate::bm25::InvertedIndex;
 use crate::query_terms::term_multiplicities;
-use crate::ranking::top_k_finite_scored_docs;
+use crate::ranking::top_k_non_nan_scored_docs;
 use crate::Error;
 use rankfns::{lm_smoothed_p, SmoothingMethod};
 use std::collections::HashMap;
@@ -52,12 +52,10 @@ fn score_jelinek_mercer(
             p_corpus,
             SmoothingMethod::JelinekMercer { lambda },
         );
-        if p_smoothed > 0.0 {
-            let log_p = p_smoothed.ln();
-            for _ in 0..count {
-                log_score += log_p;
-            }
+        if p_smoothed == 0.0 {
+            return f32::NEG_INFINITY;
         }
+        log_score += count as f32 * p_smoothed.ln();
     }
 
     log_score
@@ -83,12 +81,10 @@ fn score_dirichlet(
             p_corpus,
             SmoothingMethod::Dirichlet { mu },
         );
-        if p_smoothed > 0.0 {
-            let log_p = p_smoothed.ln();
-            for _ in 0..count {
-                log_score += log_p;
-            }
+        if p_smoothed == 0.0 {
+            return f32::NEG_INFINITY;
         }
+        log_score += count as f32 * p_smoothed.ln();
     }
 
     log_score
@@ -111,18 +107,13 @@ pub fn retrieve_query_likelihood(
         return Ok(Vec::new());
     }
 
-    let (corpus_term_freqs, corpus_size) = index.corpus_stats_cached();
-    let corpus_term_freqs = corpus_term_freqs.as_ref();
     let terms = term_multiplicities(query_terms);
 
-    // Candidate docs: prefer postings-based candidates, but fall back to all docs
-    // (smoothing can give non-zero mass even for non-matching docs).
-    let mut candidates = index.candidates(query_terms);
-    if candidates.is_empty() {
-        candidates = index.document_ids().collect();
-    }
-
-    let results = candidates.into_iter().map(|doc_id| {
+    // Smoothing gives non-matching documents probability mass, so exact retrieval must score
+    // every live document. A postings-only candidate set is not exact for either model.
+    let (corpus_term_freqs, corpus_size) = index.corpus_stats_cached();
+    let corpus_term_freqs = corpus_term_freqs.as_ref();
+    let scored_documents = index.document_ids().map(|doc_id| {
         let score = match params.smoothing {
             SmoothingMethod::JelinekMercer { lambda } => score_jelinek_mercer(
                 index,
@@ -138,13 +129,130 @@ pub fn retrieve_query_likelihood(
         };
         (doc_id, score)
     });
-    Ok(top_k_finite_scored_docs(results, k))
+    Ok(top_k_non_nan_scored_docs(scored_documents, k))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bm25::InvertedIndex;
+    use std::collections::BTreeMap;
+
+    fn oracle(
+        docs: &[(u32, Vec<&str>)],
+        query: &[String],
+        k: usize,
+        smoothing: SmoothingMethod,
+    ) -> Vec<(u32, f32)> {
+        let corpus_size = docs.iter().map(|(_, terms)| terms.len()).sum::<usize>() as f32;
+        let mut corpus_tf = BTreeMap::<&str, usize>::new();
+        for term in docs.iter().flat_map(|(_, terms)| terms) {
+            *corpus_tf.entry(term).or_default() += 1;
+        }
+        let mut query_counts = BTreeMap::<&str, usize>::new();
+        for term in query {
+            *query_counts.entry(term).or_default() += 1;
+        }
+
+        let mut scores: Vec<_> = docs
+            .iter()
+            .map(|(doc_id, terms)| {
+                let mut score = 0.0_f32;
+                for (term, count) in &query_counts {
+                    let tf = terms.iter().filter(|candidate| *candidate == term).count() as f32;
+                    let p_corpus = *corpus_tf.get(term).unwrap_or(&0) as f32 / corpus_size;
+                    let probability = match smoothing {
+                        SmoothingMethod::JelinekMercer { lambda } => {
+                            let lambda = lambda.clamp(0.0, 1.0);
+                            let p_doc = if terms.is_empty() {
+                                0.0
+                            } else {
+                                tf / terms.len() as f32
+                            };
+                            lambda * p_doc + (1.0 - lambda) * p_corpus
+                        }
+                        SmoothingMethod::Dirichlet { mu } => {
+                            let mu = mu.max(0.0);
+                            let denominator = terms.len() as f32 + mu;
+                            if denominator > 0.0 {
+                                (tf + mu * p_corpus) / denominator
+                            } else {
+                                0.0
+                            }
+                        }
+                    };
+                    if probability == 0.0 {
+                        score = f32::NEG_INFINITY;
+                        break;
+                    }
+                    score += *count as f32 * probability.ln();
+                }
+                (*doc_id, score)
+            })
+            .collect();
+        scores.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        scores.truncate(k);
+        scores
+    }
+
+    #[test]
+    fn query_likelihood_matches_exhaustive_oracle() {
+        let docs = vec![
+            (7, vec!["a", "a", "b"]),
+            (2, vec!["b", "c"]),
+            (9, vec!["a", "c"]),
+            (4, vec!["c", "c"]),
+        ];
+        let mut index = InvertedIndex::new();
+        for (doc_id, terms) in &docs {
+            index.add_document(
+                *doc_id,
+                &terms.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            );
+        }
+
+        let queries = [vec!["a"], vec!["a", "a"], vec!["a", "b"], vec!["missing"]];
+        let methods = [
+            SmoothingMethod::JelinekMercer { lambda: 0.0 },
+            SmoothingMethod::JelinekMercer { lambda: 0.4 },
+            SmoothingMethod::JelinekMercer { lambda: 1.0 },
+            SmoothingMethod::Dirichlet { mu: 0.0 },
+            SmoothingMethod::Dirichlet { mu: 3.0 },
+        ];
+
+        for query in queries {
+            let query = query
+                .into_iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            for smoothing in methods {
+                for k in 0..=docs.len() + 1 {
+                    let actual = retrieve_query_likelihood(
+                        &index,
+                        &query,
+                        k,
+                        QueryLikelihoodParams { smoothing },
+                    )
+                    .unwrap();
+                    let expected = oracle(&docs, &query, k, smoothing);
+                    assert_eq!(actual.len(), expected.len());
+                    for ((actual_doc, actual_score), (expected_doc, expected_score)) in
+                        actual.iter().zip(&expected)
+                    {
+                        assert_eq!(
+                            actual_doc, expected_doc,
+                            "query={query:?}, smoothing={smoothing:?}, k={k}"
+                        );
+                        if expected_score.is_infinite() {
+                            assert_eq!(actual_score, expected_score);
+                        } else {
+                            assert!((actual_score - expected_score).abs() < 1e-6);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn query_likelihood_is_deterministic_on_ties() {

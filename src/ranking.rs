@@ -49,9 +49,24 @@ where
     top_k_scored_docs(docs, k, |score| score.is_finite() && score > 0.0)
 }
 
-pub(crate) fn top_k_finite_scored_docs<I>(docs: I, k: usize) -> Vec<(u32, f32)>
+pub(crate) fn top_k_non_nan_scored_docs<I>(docs: I, k: usize) -> Vec<(u32, f32)>
 where
     I: IntoIterator<Item = (u32, f32)>,
 {
-    top_k_scored_docs(docs, k, f32::is_finite)
+    top_k_scored_docs(docs, k, |score| !score.is_nan())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::top_k_non_nan_scored_docs;
+
+    #[test]
+    fn non_nan_top_k_keeps_negative_infinity_after_finite_scores() {
+        let ranked = top_k_non_nan_scored_docs(
+            [(3, f32::NEG_INFINITY), (2, -1.0), (1, f32::NAN), (4, -1.0)],
+            3,
+        );
+
+        assert_eq!(ranked, vec![(2, -1.0), (4, -1.0), (3, f32::NEG_INFINITY)]);
+    }
 }

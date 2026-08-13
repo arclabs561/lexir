@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use lexir::bm25::{Bm25Params, InvertedIndex};
 use lexir::query_likelihood::{retrieve_query_likelihood, QueryLikelihoodParams};
 use lexir::tfidf::{retrieve_tfidf, TfIdfParams};
@@ -1041,6 +1041,8 @@ fn bench_query_likelihood_retrieve(c: &mut Criterion) {
     let index = build_index();
     let params = QueryLikelihoodParams::default();
     let mut group = c.benchmark_group("query_likelihood_retrieve");
+    // Exact smoothing scores every live document, including postings nonmatches.
+    group.throughput(Throughput::Elements(N_DOCS as u64));
 
     for n in [2usize, 8] {
         let query = query_terms(&index, n, 20);

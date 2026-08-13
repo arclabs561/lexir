@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Query-likelihood retrieval now scores every live document and treats a
+  zero-probability query term as a zero-probability query.
+
 ## [0.3.0] - 2026-07-09
 
 ### Changed
