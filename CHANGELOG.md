@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The `fuzzy` feature now uses `gramdex` 0.4; `FuzzyConfig::planner` and the
+  `gramdex::Error` in fuzzy results are 0.4 types.
+
 ### Fixed
 
 - Query-likelihood retrieval now scores every live document and treats a
