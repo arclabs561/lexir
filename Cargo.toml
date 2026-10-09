@@ -46,6 +46,7 @@ cli = ["dep:clap", "recordlog"]
 name = "lexir"
 test = false
 path = "src/bin/lexir.rs"
+required-features = ["cli"]
 
 [[bench]]
 name = "retrieve"
