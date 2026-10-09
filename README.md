@@ -10,6 +10,12 @@ and corpus statistics; the `raw-segment` feature scores immutable
 storage, commits, deletes, and segment merges belong to the caller or
 [`postings`](https://crates.io/crates/postings).
 
+The default BM25 comes from [`rankfns`](https://crates.io/crates/rankfns):
+Lucene's IDF with the `(k1 + 1)` numerator and exact document lengths; BM25L
+and BM25+ are opt-in variants. For a full search engine
+with its own tokenizers, query parser and segment lifecycle, use tantivy; use
+`lexir` when you supply the tokens and want the scoring layer alone.
+
 ## Install
 
 ```toml

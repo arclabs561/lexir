@@ -1,3 +1,4 @@
+#![doc = include_str!("../README.md")]
 //! `lexir`: lexical IR built on `postings`.
 //!
 //! Lexical retrieval built on `postings`:
