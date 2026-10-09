@@ -7,10 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-09
+
 ### Changed
 
-- The `fuzzy` feature now uses `gramdex` 0.4; `FuzzyConfig::planner` and the
-  `gramdex::Error` in fuzzy results are 0.4 types.
+- Requires `postings` 0.5, and with the `persistence` feature `durability`
+  0.8. The two move together because `persistence` passes a durability
+  `Directory` into postings.
+- The `fuzzy` feature uses `gramdex` 0.5; `FuzzyConfig::planner` and the
+  `gramdex::Error` in fuzzy results are 0.5 types.
+- The `lexir` binary declares `required-features = ["cli"]`. Before,
+  `cargo install lexir` without `--features cli` failed to compile it.
 
 ### Fixed
 
