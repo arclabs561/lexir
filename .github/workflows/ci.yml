@@ -6,6 +6,8 @@ permissions:
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
 
 jobs:
   test:
@@ -37,6 +39,9 @@ jobs:
 
       - name: test (all features)
         run: cargo test --all-targets --all-features
+
+      - name: doc tests (all features)
+        run: cargo test --doc --all-features
 
       - name: Semver check
         if: github.event_name == 'pull_request'
