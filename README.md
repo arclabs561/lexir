@@ -45,6 +45,9 @@ assert_eq!(hits[0].0, 1);
 - `cli`: build and search indexes from the command line
 - `fuzzy`: expand out-of-vocabulary query terms
 
+The default and non-CLI library features support Rust 1.80. The `cli` feature
+and all-feature builds require Rust 1.85 with the current Clap dependency.
+
 Run `cargo run --features cli -- --help` for CLI usage.
 
 ## License

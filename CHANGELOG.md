@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `durability` 0.9. These move together because persistence methods pass a
   `durability::Directory` into postings. Callers passing directories or
   postings indexes must align those dependency versions with lexir.
+- The `fuzzy` feature uses `gramdex` 0.6; `FuzzyConfig::planner` and the
+  `gramdex::Error` in fuzzy results are 0.6 types.
 
 ## [0.4.0] - 2026-10-09
 
