@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `postings` 0.6 and, with the default `persistence` feature,
+  `durability` 0.9. These move together because persistence methods pass a
+  `durability::Directory` into postings. Callers passing directories or
+  postings indexes must align those dependency versions with lexir.
+
 ## [0.4.0] - 2026-10-09
 
 ### Changed

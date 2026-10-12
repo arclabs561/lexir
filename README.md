@@ -20,7 +20,7 @@ with its own tokenizers, query parser and segment lifecycle, use tantivy; use
 
 ```toml
 [dependencies]
-lexir = "0.4"
+lexir = "0.5"
 ```
 
 ## Usage
