@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Source history (unversioned)
+
+These entries identify source changes without assigning a package release.
+
+- Require `postings` 0.6.1, which validates raw document IDs against segment
+  header bounds before they reach query scratch indexing.
+  ([97fe778](https://github.com/arclabs561/lexir/commit/97fe7783d1d626baa157a656cca8716bc2810741))
+
 ## [Unreleased]
 
 ## [0.5.0] - 2026-10-12
