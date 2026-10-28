@@ -5,10 +5,10 @@ opening a full in-memory `InvertedIndex`:
 
 ```toml
 [dependencies]
-lexir = { version = "0.3", features = ["raw-segment"] }
+lexir = { version = "0.5", features = ["raw-segment"] }
 ```
 
-## Segment Sets
+## Segment sets
 
 `lexir::raw::retrieve_bm25_raw_file` scores one segment using that segment's
 local document frequencies. For an immutable segment set, use
@@ -20,7 +20,7 @@ The multi-file path orders segments by a conservative BM25 upper bound and can
 skip segments that cannot enter the current top-k. Segment document ids must be
 globally unique.
 
-## Prefiltered Candidates
+## Prefiltered candidates
 
 Use `retrieve_bm25_raw_file_candidates` or
 `retrieve_bm25_raw_files_candidates` when an exact filter has already produced
@@ -32,7 +32,7 @@ tombstones or newer-version masks. The predicate is applied while building BM25
 corpus stats and while scoring, so stale docs cannot fill a top-k slot before
 filtering.
 
-## Streaming Ingestion
+## Streaming ingestion
 
 For streaming ingestion, `retrieve_bm25_raw_files_and_index` searches sealed raw
 segment files plus one live `postings::PostingsIndex<u64, u32>` shard with
@@ -46,7 +46,7 @@ can skip low-bound sealed files.
 `RawBm25LiveShard` pairs that dictionary with one bounded live shard, can add
 token streams, encode queries, decide when the shard reaches a caller-selected
 `RawBm25SealPolicy`, and seal the shard to a caller-provided raw segment writer.
-It does not own paths, commits, durable publication, retention, or compaction.
+The caller chooses paths and handles durable publication, retention and compaction.
 
 `cargo run --example raw_bm25_generation --features raw-segment` shows the
 pattern: encode documents into a live numeric shard, seal full shards to raw
