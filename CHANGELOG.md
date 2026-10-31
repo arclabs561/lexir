@@ -15,6 +15,15 @@ These entries identify source changes without assigning a package release.
 
 ## [Unreleased]
 
+### Fixed
+
+- CLI: `log-compact` and `log-prune` rebuild the log from the checkpoint plus
+  the unapplied log suffix instead of from `ops.log` alone. Documents that
+  `log-checkpoint --reset-log` had folded into the checkpoint were dropped by
+  either command. Both commands now refuse to run when the checkpoint exists,
+  the log is non-empty and the meta file is missing, as the other log commands
+  already do; `log-doctor --fix` repairs that state.
+
 ## [0.5.0] - 2026-10-12
 
 ### Changed
