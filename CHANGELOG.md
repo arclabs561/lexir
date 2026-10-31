@@ -15,6 +15,13 @@ These entries identify source changes without assigning a package release.
 
 ## [Unreleased]
 
+### Changed
+
+- Documentation only: `Bm25Variant::BM25L`, `Bm25Variant::BM25Plus` and the
+  README state that the variants pair the Lv and Zhai (2011) term-frequency
+  transforms with Lucene's IDF, `ln((N + 1) / (df + 0.5))`, rather than the
+  paper's `ln((N + 1) / df)`, so rankings can differ from the paper.
+
 ## [0.5.1] - 2026-10-30
 
 ### Fixed

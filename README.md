@@ -11,7 +11,9 @@ and document storage; positional matching and segment lifecycle are separate.
 
 The default BM25 comes from [`rankfns`](https://crates.io/crates/rankfns):
 Lucene's IDF with the `(k1 + 1)` numerator and exact document lengths; BM25L
-and BM25+ are opt-in variants.
+and BM25+ are opt-in variants. The variants apply the term-frequency transforms
+of Lv and Zhai (2011) but keep Lucene's IDF, `ln((N + 1) / (df + 0.5))`, where
+the paper uses `ln((N + 1) / df)`, so their rankings can differ from the paper.
 
 ## Install
 
