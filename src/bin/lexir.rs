@@ -261,25 +261,37 @@ fn recover_checkpoint_plus_suffix(
 }
 
 #[cfg(feature = "cli")]
-fn compacted_ops(ops: &[LogOp]) -> Vec<LogOp> {
-    // Materialize final state per doc id. A missing value means the final op for
-    // that id is a delete, so the compacted self-contained log omits it.
-    let mut final_state: BTreeMap<u32, Option<Vec<String>>> = BTreeMap::new();
-    for op in ops {
-        match op {
-            LogOp::Add { doc_id, terms } => {
-                final_state.insert(*doc_id, Some(terms.clone()));
-            }
-            LogOp::Delete { doc_id } => {
-                final_state.insert(*doc_id, None);
-            }
+fn materialized_ops(idx: &InvertedIndex) -> Result<Vec<LogOp>, Box<dyn std::error::Error>> {
+    // Rebuild one `Add` per live document from the recovered index, not from the
+    // log: after `log-checkpoint --reset-log` earlier documents exist only in the
+    // checkpoint. Term order is not stored, so each term repeats `tf` times in
+    // sorted order, which indexes to the same postings and document length.
+    let mut docs: BTreeMap<u32, Vec<String>> =
+        idx.document_ids().map(|id| (id, Vec::new())).collect();
+    let mut terms: Vec<&str> = idx.terms().collect();
+    terms.sort_unstable();
+    for term in terms {
+        for (doc_id, tf) in idx.postings_iter(term) {
+            let doc_terms = docs
+                .get_mut(&doc_id)
+                .ok_or_else(|| format!("posting for unknown doc_id={doc_id}"))?;
+            doc_terms.extend(std::iter::repeat(term.to_string()).take(tf as usize));
         }
     }
-
-    final_state
+    for (doc_id, doc_terms) in &docs {
+        let expected = idx.document_length(*doc_id) as usize;
+        if doc_terms.len() != expected {
+            return Err(format!(
+                "cannot materialize doc_id={doc_id}: postings hold {} terms but document length is {expected}",
+                doc_terms.len()
+            )
+            .into());
+        }
+    }
+    Ok(docs
         .into_iter()
-        .filter_map(|(doc_id, maybe_terms)| maybe_terms.map(|terms| LogOp::Add { doc_id, terms }))
-        .collect()
+        .map(|(doc_id, terms)| LogOp::Add { doc_id, terms })
+        .collect())
 }
 
 #[cfg(feature = "cli")]
@@ -315,20 +327,34 @@ fn rewrite_log(
 
 #[cfg(feature = "cli")]
 fn rewrite_materialized_log(
+    root: &Path,
     dir: &durability::FsDirectory,
-    arc: Arc<dyn Directory>,
     checkpoint: &str,
     log: &str,
-    ops: &[LogOp],
+    mode: RecordLogReadMode,
     durable: bool,
 ) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    // Start from checkpoint + unapplied suffix: the log alone may not hold
+    // everything the checkpoint does.
+    let RecoveredLogState {
+        idx: recovered,
+        ops,
+        directory: arc,
+        ..
+    } = recover_checkpoint_plus_suffix(root, dir, checkpoint, log, mode)?;
     let old_ops_len = ops.len();
-    let new_ops = compacted_ops(ops);
-
-    rewrite_log(dir, arc, log, &new_ops, durable)?;
+    let new_ops = materialized_ops(&recovered)?;
 
     let mut idx = InvertedIndex::new();
     apply_ops(&mut idx, &new_ops);
+    if fingerprint(&idx) != fingerprint(&recovered) {
+        return Err(
+            "refusing to rewrite log: materialized ops do not rebuild the current state".into(),
+        );
+    }
+
+    rewrite_log(dir, arc, log, &new_ops, durable)?;
+
     if durable {
         idx.save_durable(dir, checkpoint)?;
     } else {
@@ -629,9 +655,10 @@ enum Commands {
 
     /// Compact the log by squashing to the current final state.
     ///
-    /// This rewrites `ops.log` to contain at most one `Add` per surviving document (sorted by
-    /// doc id), deletes redundant history, and writes a fresh checkpoint consistent with the
-    /// compacted log. After this, `log-validate` should still pass.
+    /// This recovers the current state (checkpoint plus unapplied log suffix), rewrites
+    /// `ops.log` to contain one `Add` per surviving document (sorted by doc id), and writes a
+    /// fresh checkpoint consistent with the compacted log. After this, `log-validate` should
+    /// still pass.
     LogCompact {
         /// Root directory for storage.
         #[arg(long, default_value = ".")]
@@ -1097,15 +1124,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 strict,
             } => {
                 let dir = durability::FsDirectory::new(&root)?;
-                let arc = dir_arc(&root)?;
                 let mode = if strict {
                     RecordLogReadMode::Strict
                 } else {
                     RecordLogReadMode::BestEffort
                 };
-                let ops: Vec<LogOp> = read_ops(arc.clone(), &log, mode)?;
                 let (old_ops_len, new_ops_len) =
-                    rewrite_materialized_log(&dir, arc, &checkpoint, &log, &ops, durable)?;
+                    rewrite_materialized_log(&root, &dir, &checkpoint, &log, mode, durable)?;
 
                 println!(
                     "ok: compacted log (old_records={} new_records={})",
@@ -1121,15 +1146,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } => {
                 // Implemented as a rebase/compact to preserve `log-validate` semantics.
                 let dir = durability::FsDirectory::new(&root)?;
-                let arc = dir_arc(&root)?;
                 let mode = if strict {
                     RecordLogReadMode::Strict
                 } else {
                     RecordLogReadMode::BestEffort
                 };
-                let ops: Vec<LogOp> = read_ops(arc.clone(), &log, mode)?;
                 let (old_ops_len, new_ops_len) =
-                    rewrite_materialized_log(&dir, arc, &checkpoint, &log, &ops, durable)?;
+                    rewrite_materialized_log(&root, &dir, &checkpoint, &log, mode, durable)?;
 
                 println!(
                     "ok: pruned history (old_records={} new_records={})",

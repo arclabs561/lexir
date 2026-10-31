@@ -256,6 +256,67 @@ fn log_compact_removes_log_when_all_docs_are_deleted() {
 }
 
 #[test]
+fn log_compact_and_prune_keep_docs_folded_into_checkpoint_by_reset_log() {
+    for cmd in ["log-compact", "log-prune"] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let root_arg = root.to_str().unwrap();
+        let add = |id: &str, text: &str| {
+            lexir()
+                .args([
+                    "log-add", "--root", root_arg, "--doc-id", id, "--text", text,
+                ])
+                .assert()
+                .success();
+        };
+
+        add("1", "alpha alpha shared");
+        add("2", "beta shared");
+        // Docs 1 and 2 now live only in the checkpoint.
+        lexir()
+            .args(["log-checkpoint", "--root", root_arg, "--reset-log"])
+            .assert()
+            .success();
+        add("3", "gamma shared");
+
+        lexir().args([cmd, "--root", root_arg]).assert().success();
+
+        lexir()
+            .args(["log-validate", "--root", root_arg])
+            .assert()
+            .success();
+        lexir()
+            .args(["log-search", "--root", root_arg, "--", "alpha"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Doc 1"));
+        lexir()
+            .args(["log-search", "--root", root_arg, "--", "beta"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Doc 2"));
+        lexir()
+            .args(["log-search", "--root", root_arg, "--", "gamma"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Doc 3"));
+
+        // The rewritten log is self-contained: it rebuilds all three docs alone.
+        fs::remove_file(root.join("index.bin")).expect("remove checkpoint");
+        fs::remove_file(root.join("index.bin.meta")).expect("remove meta");
+        lexir()
+            .args(["log-search", "--root", root_arg, "--", "shared"])
+            .assert()
+            .success()
+            .stdout(
+                predicate::str::contains("Doc 1")
+                    .and(predicate::str::contains("Doc 2"))
+                    .and(predicate::str::contains("Doc 3")),
+            );
+    }
+}
+
+#[test]
 fn torn_tail_best_effort_scan_succeeds_strict_fails() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
