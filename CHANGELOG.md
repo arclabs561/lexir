@@ -15,6 +15,8 @@ These entries identify source changes without assigning a package release.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-30
+
 ### Fixed
 
 - CLI: `log-compact` and `log-prune` rebuild the log from the checkpoint plus
