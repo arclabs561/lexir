@@ -31,11 +31,19 @@ pub enum Bm25Variant {
     #[default]
     Standard,
     /// BM25L: adds a small constant to TF contribution.
+    ///
+    /// Uses the term-frequency transform of Lv and Zhai (2011) with Lucene's
+    /// IDF, `ln((N + 1) / (df + 0.5))`, not the paper's `ln((N + 1) / df)`.
+    /// Rankings can differ from the paper's formulation.
     BM25L {
         /// Additive term-frequency offset.
         delta: f32,
     },
     /// BM25+: lower-bounds TF contribution.
+    ///
+    /// Uses the term-frequency transform of Lv and Zhai (2011) with Lucene's
+    /// IDF, `ln((N + 1) / (df + 0.5))`, not the paper's `ln((N + 1) / df)`.
+    /// Rankings can differ from the paper's formulation.
     BM25Plus {
         /// Additive term-frequency offset.
         delta: f32,
