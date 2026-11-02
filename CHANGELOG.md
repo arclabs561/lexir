@@ -15,6 +15,8 @@ These entries identify source changes without assigning a package release.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-01
+
 ### Changed
 
 - Documentation only: `Bm25Variant::BM25L`, `Bm25Variant::BM25Plus` and the
