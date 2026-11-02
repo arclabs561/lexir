@@ -262,6 +262,10 @@ These entries identify source changes without assigning a package release.
 
 ## [0.2.0] - 2026-07-02
 
+Timings quoted in this entry and in `[0.1.5]` were measured on an unstated host
+and are not reproducible from a current build; see the README `Performance`
+section for the current baseline and its command.
+
 ### Changed
 - Changed `lexir index` and `lexir search` to stream corpus files line by
   line instead of reading the whole input file before indexing.

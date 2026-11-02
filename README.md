@@ -49,6 +49,36 @@ and all-feature builds require Rust 1.85 with the current Clap dependency.
 
 Run `cargo run --features cli -- --help` for CLI usage.
 
+## Performance
+
+BM25 retrieval on the in-memory `InvertedIndex`, release build, `k = 10`,
+`Bm25Params::default()`. The benchmark corpus is fixed at 20,000 documents of 80
+Zipf-distributed terms drawn from a 5,000-term vocabulary (1.6M postings); query
+terms are taken in term-id order and only terms with `df >= 20` are used. Because
+the benchmark fixes the corpus and `k`, the number of query terms is the
+retrieval parameter that moves in these rows.
+
+| Operation | Corpus / query terms | Time (mean) |
+| --- | --- | --- |
+| `bm25_retrieve/terms/1` | 20,000 docs / 1 term | 604 µs |
+| `bm25_retrieve/terms/2` | 20,000 docs / 2 terms | 1.24 ms |
+| `bm25_retrieve/terms/8` | 20,000 docs / 8 terms | 3.68 ms |
+| `bm25_retrieve/terms/32` | 20,000 docs / 32 terms | 8.54 ms |
+
+Machine: Apple M3 Max, 16 cores, 128 GiB RAM, macOS 27.0.1, aarch64-apple-darwin,
+rustc 1.99.1, Criterion 0.5.
+
+```console
+cargo bench --bench retrieve -- 'bm25_retrieve/terms/(1|2|8|32)$' \
+  --warm-up-time 2 --measurement-time 10 --sample-size 50
+```
+
+Not claimed: no latency guarantee, no cold-start or single-query figures, no
+corpus sizes other than 20,000 documents, and no comparison against other search
+engines. The host was running unrelated work during measurement, so treat these
+as one run on a shared machine; a repeat of the 2-term and 8-term rows gave
+1.18 ms and 3.65 ms.
+
 ## License
 
 MIT OR Apache-2.0
