@@ -36,6 +36,19 @@ assert_eq!(hits[0].0, 1);
 # Ok::<(), lexir::Error>(())
 ```
 
+### Search a text file
+
+Put one document on each line. From a checkout:
+
+```sh
+printf '%s\n' 'red fox' 'blue whale' 'red panda' > corpus.txt
+cargo run --features cli -- search --input corpus.txt fox
+```
+
+The only hit is `Doc 0`, the first line. Replace `corpus.txt` with your file
+and `fox` with your search terms. The CLI splits on whitespace and preserves
+case and punctuation, so `Fox` and `fox.` are different terms from `fox`.
+
 ## Features
 
 - `persistence` (default): save and load in-memory indexes
