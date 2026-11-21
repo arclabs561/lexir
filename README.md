@@ -46,6 +46,8 @@ assert_eq!(hits[0].0, 1);
 
 The default and non-CLI library features support Rust 1.80. The `cli` feature
 and all-feature builds require Rust 1.85 with the current Clap dependency.
+On Rust 1.80, use a lockfile resolved for your application's `rust-version`.
+See the [minimum-version build](https://github.com/arclabs561/lexir/blob/main/CONTRIBUTING.md#setup) for the commands.
 
 Run `cargo run --features cli -- --help` for CLI usage.
 
