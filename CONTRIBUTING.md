@@ -17,6 +17,16 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
 
+Cargo 1.80 can select dependencies that require a newer compiler. To reproduce
+CI's minimum-version build from a fresh checkout, resolve the lockfile with Cargo
+1.85 first. It reads the package's `rust-version` from `Cargo.toml`.
+
+```sh
+CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo +1.85.0 generate-lockfile
+cargo +1.80.0 check --locked --lib
+cargo +1.85.0 check --locked --lib --all-features
+```
+
 ## Style
 
 - Direct, lowercase prose in commits. No marketing words ("powerful", "robust", "elegant"). No em-dashes in prose.
