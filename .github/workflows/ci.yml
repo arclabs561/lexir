@@ -73,6 +73,13 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.80.0"
+      - name: Check fresh consumer on Rust 1.80.0
+        run: |
+          consumer="$RUNNER_TEMP/consumer"
+          cargo +1.80.0 new --lib "$consumer"
+          cd "$consumer"
+          cargo +1.80.0 add lexir --path "$GITHUB_WORKSPACE"
+          cargo +1.80.0 check
       - name: Check default library
         run: cargo +1.80.0 check --locked --lib
       - name: Check non-CLI library features
